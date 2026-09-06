@@ -19,7 +19,7 @@ are little-endian.
 | EDGE input | PA1 (TIM2_CH2): external gate/trigger for the whole capture |
 | CLK input | PA0: not implemented in firmware v0.2 |
 | PWM outputs | M15=PC8, M16=PC7, M17=PC6 (TIM3); M18=PB15, M19=PB14 (TIM12) |
-| PWM input | one pin, TIM input-capture (period + high time) |
+| PWM input | M20=PA2 (TIM9_CH1), input-capture (period + high time) |
 | LED | PA6: solid = idle; blinking = awaiting trigger / sampling |
 | Sample memory | 240 640 bytes (`LA_DATA_BUF_SIZE` = 512 × 470) |
 
@@ -302,6 +302,14 @@ flight and rule §2.3 applies.
 * `GET_SAMPLES` in stream mode when no stream is running blocks the main
   loop forever (`while (StreamPackReady == 0)`); only a power-cycle recovers.
   Never send it unless a stream capture is active.
+* The USB receive interrupt copies every command into a **single slot**
+  (`USBDataBuf`) that the main loop picks up later; there is no queue. A
+  command that arrives before the previous one was consumed overwrites it.
+  In practice this bites `CONFIG` followed immediately by `GET_SAMPLES` in
+  stream mode: `CONFIG` is lost, `GET_SAMPLES` runs in the previous mode and
+  the firmware ends up stuck as in the first bullet. Wait ≥ 10 ms after
+  `CONFIG` (or until the write has physically drained, e.g. `tcdrain`)
+  before sending the next command.
 * With level-only channel triggers the main loop busy-waits, so
   `SAMPLE_STOP` is not processed until the trigger fires. `GET_STATUS` still
   works. Edge triggers do not have this problem.

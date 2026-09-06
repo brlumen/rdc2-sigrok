@@ -32,6 +32,8 @@
 #define RDC2_DRAIN_IDLE_MS		200
 #define RDC2_POLL_INTERVAL_MS		100
 #define RDC2_TIMER_INTERVAL_MS		100
+/* Time for the firmware main loop to consume CONFIG (spec 7.3). */
+#define RDC2_CONFIG_SETTLE_MS		20
 
 /* Samples handed to the session bus in one SR_DF_LOGIC packet. */
 #define RDC2_FEED_CHUNK_SAMPLES		16384
@@ -1075,8 +1077,12 @@ SR_PRIV int rdc2_start_acquisition(const struct sr_dev_inst *sdi)
 
 	/*
 	 * Spec 7.3: GET_SAMPLES must only be sent while a stream capture is
-	 * running, the capture above has just been started by CONFIG.
+	 * running, the capture above has just been started by CONFIG. The
+	 * firmware keeps a single command slot, so a GET_SAMPLES that lands
+	 * before the main loop picked up CONFIG overwrites it and hangs the
+	 * device (spec 7.3). Give the main loop time to consume CONFIG.
 	 */
+	g_usleep(1000 * RDC2_CONFIG_SETTLE_MS);
 	ret = rdc2_request(sdi, RDC2_MODULE_LA, RDC2_LA_CMD_GET_SAMPLES,
 		RDC2_STREAM_PACKET_SIZE, rdc2_stream_timeout_ms(&devc->cap));
 	if (ret != SR_OK) {
