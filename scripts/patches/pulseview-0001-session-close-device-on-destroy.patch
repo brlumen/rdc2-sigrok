@@ -1,0 +1,46 @@
+From 6ae5e5876ead9349857e9a50e3fdc7156f4b96c7 Mon Sep 17 00:00:00 2001
+From: BrLumen <igflocal@gmail.com>
+Date: Sun, 6 Sep 2026 20:06:32 +0700
+Subject: [PATCH 1/2] Session: close the device when the session is destroyed
+
+Commit 4d6c6ea3 ("Fix #605 by closing current device when another is
+selected") made Session::set_device() close the previous device, but a
+session that is destroyed (its tab closed, or PulseView quitting) still
+leaves its device open: DeviceManager keeps every HardwareDevice alive in
+its device list (and in user_spec_device_ for -d), so the device object
+is never destructed and its close() never runs.
+
+For USB devices this goes unnoticed. Serial drivers hold their port
+exclusively while the device is open, so after closing a session tab
+every later scan fails with "Resource busy" and the device cannot be
+used again until PulseView is restarted.
+
+Close the device in the Session destructor, mirroring set_device().
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Signed-off-by: BrLumen <igflocal@gmail.com>
+---
+ pv/session.cpp | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/pv/session.cpp b/pv/session.cpp
+index 03770097..cf0ee5c6 100644
+--- a/pv/session.cpp
++++ b/pv/session.cpp
+@@ -137,6 +137,13 @@ Session::~Session()
+ 	// Stop and join to the thread
+ 	stop_capture();
+ 
++	// Release the device. The DeviceManager keeps the device object alive,
++	// so it would otherwise stay open after the session is gone; serial
++	// drivers hold their port exclusively while open, which blocks every
++	// later scan and session from using the device.
++	if (device_)
++		device_->close();
++
+ 	for (SignalGroup* group : signal_groups_) {
+ 		group->clear();
+ 		delete group;
+-- 
+2.50.1 (Apple Git-155)
+

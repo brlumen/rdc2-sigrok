@@ -1,3 +1,30 @@
+From a7ed25053f78c47e512121ae29e0a6574978f550 Mon Sep 17 00:00:00 2001
+From: BrLumen <igflocal@gmail.com>
+Date: Sun, 6 Sep 2026 20:06:32 +0700
+Subject: [PATCH 2/2] DeviceManager: don't drop open devices during a driver
+ scan
+
+driver_scan() removes every device of the driver from the device list
+before scanning, assuming the scan will find them again. A device that is
+currently open in a session cannot always be probed again: serial drivers
+hold the port exclusively, so the scan fails with "Resource busy" and the
+open device silently disappears from the list, leaving the session with
+an orphaned device and "<No Device>" for new sessions.
+
+Keep devices that are open, skip newly scanned instances that refer to
+the same connection (drivers that do not lock their transport find the
+device again), and return the kept devices together with the new ones so
+that the connect dialog still lists them. Add HardwareDevice::is_open()
+for that.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Signed-off-by: BrLumen <igflocal@gmail.com>
+---
+ pv/devicemanager.cpp          | 37 ++++++++++++++++++++++++++++++-----
+ pv/devices/hardwaredevice.cpp |  5 +++++
+ pv/devices/hardwaredevice.hpp |  5 +++++
+ 3 files changed, 42 insertions(+), 5 deletions(-)
+
 diff --git a/pv/devicemanager.cpp b/pv/devicemanager.cpp
 index 09d9014b..81bbeba5 100644
 --- a/pv/devicemanager.cpp
@@ -104,21 +131,6 @@ index 32f5b644..8ccc65e3 100644
  private:
  	const shared_ptr<sigrok::Context> context_;
  	bool device_open_;
-diff --git a/pv/session.cpp b/pv/session.cpp
-index 03770097..cf0ee5c6 100644
---- a/pv/session.cpp
-+++ b/pv/session.cpp
-@@ -137,6 +137,13 @@ Session::~Session()
- 	// Stop and join to the thread
- 	stop_capture();
- 
-+	// Release the device. The DeviceManager keeps the device object alive,
-+	// so it would otherwise stay open after the session is gone; serial
-+	// drivers hold their port exclusively while open, which blocks every
-+	// later scan and session from using the device.
-+	if (device_)
-+		device_->close();
-+
- 	for (SignalGroup* group : signal_groups_) {
- 		group->clear();
- 		delete group;
+-- 
+2.50.1 (Apple Git-155)
+
