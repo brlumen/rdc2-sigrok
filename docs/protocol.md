@@ -310,13 +310,15 @@ flight and rule §2.3 applies.
   the firmware ends up stuck as in the first bullet. Wait ≥ 10 ms after
   `CONFIG` (or until the write has physically drained, e.g. `tcdrain`)
   before sending the next command.
-* **108 MHz (five DMA streams) is unreliable.** In roughly 3 of 5 buffer
-  captures one of the five streams loses a DMA request; from that sample on
-  it is shifted by one and the de-interleaved data shows a bogus 5-sample
-  pattern. It does not depend on the sample count (seen with 10 k and 30 k),
-  so the vendor's 30 k limit does not prevent it. 72 MHz (four streams) and
-  below were clean over the whole 240 k buffer. Warn the user; do not rely
-  on 108 MHz data without checking it.
+* **Lost DMA requests at high DMA load** (observed on one board, firmware
+  0.2; may be specific to that unit). In a buffer capture one DMA stream
+  skips a sample and stays shifted; after de-interleaving the data shows a
+  bogus N-sample pattern (N = stream count). 8 captures each: 16 channels at
+  72 MHz (144 MB/s, 4 streams) corrupt in 5 of 8; 8 channels at 108 MHz
+  (108 MB/s, 5 streams, vendor-experimental) corrupt in 3 of 5; 16 channels
+  at 54 MHz, 8 at 72 MHz and 32 at 24 MHz clean in 8 of 8 over the whole
+  buffer. Independent of the sample count. The host tools warn for the
+  108 MHz preset only, as the vendor software does.
 * With level-only channel triggers the main loop busy-waits, so
   `SAMPLE_STOP` is not processed until the trigger fires. `GET_STATUS` still
   works. Edge triggers do not have this problem.
