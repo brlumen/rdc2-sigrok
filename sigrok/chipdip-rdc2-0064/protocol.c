@@ -730,6 +730,18 @@ SR_PRIV int rdc2_setup_capture(const struct sr_dev_inst *sdi)
 			return SR_ERR;
 		}
 
+		/*
+		 * Five DMA streams (the 108MHz preset) sometimes lose a DMA
+		 * request, after which one stream is shifted by a sample and
+		 * the de-interleaved data is garbage (spec 7.3). Seen in 3 of
+		 * 5 captures on firmware 0.2; 72MHz and below were clean.
+		 */
+		if (cap->dma_streams == RDC2_MAX_DMA_STREAMS)
+			sr_warn("%" PRIu64 " Hz is experimental on this "
+				"hardware: DMA requests may be lost and part of "
+				"the capture corrupted. Verify the data or use "
+				"72 MHz.", cap->rate->rate);
+
 		if (count % cap->dma_streams) {
 			count -= count % cap->dma_streams;
 			if (!count)

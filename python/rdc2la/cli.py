@@ -299,6 +299,13 @@ def _run_buffer_capture(args, device: Device, triggers, edge) -> int:
     if progress:
         _progress_done()
     _report_rate(args.rate, result.rate)
+    if result.n_streams == pr.DMA_STREAM_COUNT_MAX:
+        print(
+            "warning: 108 MHz uses five DMA streams and the hardware sometimes "
+            "drops a DMA request; part of the capture may then be garbage "
+            "(spec 7.3). Verify the data or stay at 72 MHz.",
+            file=sys.stderr,
+        )
     print(
         f"buffer capture: {result.sample_count} samples, {result.channels} channels, "
         f"{format_hz(result.rate)}, {format_seconds(result.duration)}, "
