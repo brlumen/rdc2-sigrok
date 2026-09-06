@@ -1,0 +1,29 @@
+diff --git a/Makefile.am b/Makefile.am
+index 3b68142..c6c9433 100644
+--- a/Makefile.am
++++ b/Makefile.am
+@@ -313,6 +313,12 @@ src_libdrivers_la_SOURCES += \
+ 	src/hardware/center-3xx/protocol.c \
+ 	src/hardware/center-3xx/api.c
+ endif
++if HW_CHIPDIP_RDC2_0064
++src_libdrivers_la_SOURCES += \
++	src/hardware/chipdip-rdc2-0064/protocol.h \
++	src/hardware/chipdip-rdc2-0064/protocol.c \
++	src/hardware/chipdip-rdc2-0064/api.c
++endif
+ if HW_CHRONOVU_LA
+ src_libdrivers_la_SOURCES += \
+ 	src/hardware/chronovu-la/protocol.h \
+diff --git a/configure.ac b/configure.ac
+index 024dd4d..f78f47f 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -321,6 +321,7 @@ SR_DRIVER([BeagleLogic], [beaglelogic], [sys_mman_h sys_ioctl_h])
+ SR_DRIVER([BK Precision 1856D], [bkprecision-1856d], [serial_comm])
+ SR_DRIVER([CEM DT-885x], [cem-dt-885x], [serial_comm])
+ SR_DRIVER([Center 3xx], [center-3xx], [serial_comm])
++SR_DRIVER([ChipDip RDC2-0064], [chipdip-rdc2-0064], [libserialport])
+ SR_DRIVER([ChronoVu LA], [chronovu-la], [libusb libftdi])
+ SR_DRIVER([Colead SLM], [colead-slm], [serial_comm])
+ SR_DRIVER([Conrad DIGI 35 CPU], [conrad-digi-35-cpu], [serial_comm])

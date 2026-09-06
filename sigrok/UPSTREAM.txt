@@ -1,0 +1,11 @@
+libsigrok upstream revision this driver was developed and built against.
+
+repository  https://github.com/sigrokproject/libsigrok.git
+branch      master
+commit      0bc2487778e660f4d3116729b6f4aee2b1996bb0
+date        2025-11-20T19:01:53+01:00
+subject     bindings/python: Add __repr__() to 'ChannelGroup' class
+
+libsigrok-build.patch was generated with "git diff" against this commit and
+touches Makefile.am and configure.ac only. apply.sh falls back to inserting
+the two entries by anchor when the patch does not apply to another revision.
