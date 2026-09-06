@@ -37,7 +37,7 @@ static const uint32_t drvopts[] = {
 static const uint32_t devopts[] = {
 	SR_CONF_CONN | SR_CONF_GET,
 	SR_CONF_SAMPLERATE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
-	SR_CONF_LIMIT_SAMPLES | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_LIMIT_SAMPLES | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
 	SR_CONF_CONTINUOUS,
 	SR_CONF_TRIGGER_MATCH | SR_CONF_LIST,
 	SR_CONF_DATA_SOURCE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
@@ -285,6 +285,7 @@ static int config_list(uint32_t key, GVariant **data,
 {
 	const uint64_t *samplerates;
 	size_t num_samplerates;
+	uint64_t min_samples, max_samples;
 
 	switch (key) {
 	case SR_CONF_SCAN_OPTIONS:
@@ -292,8 +293,14 @@ static int config_list(uint32_t key, GVariant **data,
 		return STD_CONFIG_LIST(key, data, sdi, cg, scanopts, drvopts,
 			devopts);
 	case SR_CONF_SAMPLERATE:
-		samplerates = rdc2_samplerate_list(&num_samplerates);
+		samplerates = rdc2_samplerate_list(sdi, &num_samplerates);
 		*data = std_gvar_samplerates(samplerates, num_samplerates);
+		break;
+	case SR_CONF_LIMIT_SAMPLES:
+		if (!sdi)
+			return SR_ERR_ARG;
+		rdc2_sample_limits(sdi, &min_samples, &max_samples);
+		*data = std_gvar_tuple_u64(min_samples, max_samples);
 		break;
 	case SR_CONF_TRIGGER_MATCH:
 		*data = std_gvar_array_i32(ARRAY_AND_SIZE(trigger_matches));

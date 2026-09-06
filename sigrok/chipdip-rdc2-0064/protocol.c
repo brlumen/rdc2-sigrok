@@ -75,13 +75,37 @@ static const struct rdc2_samplerate samplerates[] = {
 
 static uint64_t samplerate_values[ARRAY_SIZE(samplerates)];
 
-SR_PRIV const uint64_t *rdc2_samplerate_list(size_t *count)
+/*
+ * Samplerates that the current channel set and data source can actually
+ * use (spec 5.3). Without a device instance the full table is returned.
+ * Frontends rebuild their rate selector from this list, so a rate that
+ * would only fail at acquisition start is never offered.
+ */
+SR_PRIV const uint64_t *rdc2_samplerate_list(const struct sr_dev_inst *sdi,
+	size_t *count)
 {
-	size_t i;
+	struct dev_context *devc;
+	uint64_t max_rate;
+	unsigned int num_channels;
+	int max_index;
+	size_t i, n;
 
-	for (i = 0; i < ARRAY_SIZE(samplerates); i++)
-		samplerate_values[i] = samplerates[i].rate;
-	*count = ARRAY_SIZE(samplerates);
+	max_rate = UINT64_MAX;
+	if (sdi && sdi->priv) {
+		devc = sdi->priv;
+		max_index = rdc2_max_enabled_channel(sdi);
+		num_channels = rdc2_channel_mode(max_index < 0 ? 0 : max_index);
+		max_rate = rdc2_max_samplerate(num_channels,
+			(devc->data_source == RDC2_DATA_SOURCE_STREAM)
+			? RDC2_MODE_STREAM : RDC2_MODE_BUFFER);
+	}
+
+	n = 0;
+	for (i = 0; i < ARRAY_SIZE(samplerates); i++) {
+		if (samplerates[i].rate <= max_rate)
+			samplerate_values[n++] = samplerates[i].rate;
+	}
+	*count = n;
 
 	return samplerate_values;
 }
@@ -557,19 +581,12 @@ static int rdc2_convert_trigger(const struct sr_dev_inst *sdi)
 }
 
 /* Derive every capture parameter from the current settings. */
-SR_PRIV int rdc2_setup_capture(const struct sr_dev_inst *sdi)
+/* Highest enabled logic channel index, or -1 when none is enabled. */
+SR_PRIV int rdc2_max_enabled_channel(const struct sr_dev_inst *sdi)
 {
-	struct dev_context *devc;
-	struct rdc2_capture *cap;
 	struct sr_channel *ch;
 	GSList *l;
-	uint64_t capacity, max_rate, count;
 	int max_index;
-	int ret;
-
-	devc = sdi->priv;
-	cap = &devc->cap;
-	memset(cap, 0, sizeof(*cap));
 
 	max_index = -1;
 	for (l = sdi->channels; l; l = l->next) {
@@ -579,6 +596,52 @@ SR_PRIV int rdc2_setup_capture(const struct sr_dev_inst *sdi)
 		if (ch->index > max_index)
 			max_index = ch->index;
 	}
+
+	return max_index;
+}
+
+/*
+ * Sample count range for the current channel set, samplerate and data
+ * source. Frontends use it to clamp their sample count widgets, so the
+ * user learns about the memory limit before the capture instead of
+ * finding fewer samples than asked for afterwards.
+ */
+SR_PRIV void rdc2_sample_limits(const struct sr_dev_inst *sdi,
+	uint64_t *min_samples, uint64_t *max_samples)
+{
+	struct dev_context *devc;
+	unsigned int num_channels;
+	int max_index;
+	gboolean stream_ok;
+
+	devc = sdi->priv;
+	max_index = rdc2_max_enabled_channel(sdi);
+	num_channels = rdc2_channel_mode(max_index < 0 ? 0 : max_index);
+	stream_ok = devc->cur_samplerate <=
+		rdc2_max_samplerate(num_channels, RDC2_MODE_STREAM);
+
+	*min_samples = 1;
+	if (devc->data_source == RDC2_DATA_SOURCE_STREAM ||
+			(devc->data_source == RDC2_DATA_SOURCE_AUTO && stream_ok))
+		*max_samples = RDC2_STREAM_MAX_SAMPLES;
+	else
+		*max_samples = rdc2_buffer_capacity(num_channels,
+			devc->cur_samplerate);
+}
+
+SR_PRIV int rdc2_setup_capture(const struct sr_dev_inst *sdi)
+{
+	struct dev_context *devc;
+	struct rdc2_capture *cap;
+	uint64_t capacity, max_rate, count;
+	int max_index;
+	int ret;
+
+	devc = sdi->priv;
+	cap = &devc->cap;
+	memset(cap, 0, sizeof(*cap));
+
+	max_index = rdc2_max_enabled_channel(sdi);
 	if (max_index < 0) {
 		sr_err("No logic channel is enabled.");
 		return SR_ERR;
@@ -608,6 +671,22 @@ SR_PRIV int rdc2_setup_capture(const struct sr_dev_inst *sdi)
 		cap->mode = (!devc->limit_samples ||
 			devc->limit_samples > capacity)
 			? RDC2_MODE_STREAM : RDC2_MODE_BUFFER;
+		/*
+		 * A stream cannot keep up with every rate. Rather than fail
+		 * with a bare "invalid samplerate" in the frontend, fall back
+		 * to a buffer capture of as many samples as the memory holds.
+		 */
+		if (cap->mode == RDC2_MODE_STREAM && devc->limit_samples &&
+				cap->rate->rate > rdc2_max_samplerate(
+				cap->num_channels, RDC2_MODE_STREAM)) {
+			sr_warn("Stream mode with %u channels is limited to "
+				"%" PRIu64 " Hz; using buffer mode with at "
+				"most %" PRIu64 " samples instead of %" PRIu64
+				".", cap->num_channels, rdc2_max_samplerate(
+				cap->num_channels, RDC2_MODE_STREAM),
+				capacity, devc->limit_samples);
+			cap->mode = RDC2_MODE_BUFFER;
+		}
 		break;
 	}
 
@@ -632,7 +711,7 @@ SR_PRIV int rdc2_setup_capture(const struct sr_dev_inst *sdi)
 		}
 		count = devc->limit_samples;
 		if (count > capacity) {
-			sr_info("Limiting the capture to %" PRIu64 " samples, "
+			sr_warn("Limiting the capture to %" PRIu64 " samples, "
 				"the sample memory holds no more with %u "
 				"channels at %" PRIu64 " Hz.", capacity,
 				cap->num_channels, cap->rate->rate);

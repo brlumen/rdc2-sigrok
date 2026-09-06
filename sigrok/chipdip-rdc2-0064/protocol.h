@@ -94,6 +94,8 @@
 
 /* NDTR is 16 bit; the vendor splits captures across DMA streams (spec 5.2). */
 #define RDC2_MAX_SAMPLES_PER_STREAM	65000
+/* Host-side stream limit of the vendor software (spec 5.3). */
+#define RDC2_STREAM_MAX_SAMPLES		16000000000ULL
 #define RDC2_MAX_DMA_STREAMS		5
 
 /* Packet header (spec 3). */
@@ -298,10 +300,14 @@ struct dev_context {
 };
 
 /* Sample rate table (protocol.c). */
-SR_PRIV const uint64_t *rdc2_samplerate_list(size_t *count);
+SR_PRIV const uint64_t *rdc2_samplerate_list(const struct sr_dev_inst *sdi,
+	size_t *count);
 SR_PRIV const struct rdc2_samplerate *rdc2_samplerate_find(uint64_t rate);
 
 /* Capture parameter helpers. */
+SR_PRIV int rdc2_max_enabled_channel(const struct sr_dev_inst *sdi);
+SR_PRIV void rdc2_sample_limits(const struct sr_dev_inst *sdi,
+	uint64_t *min_samples, uint64_t *max_samples);
 SR_PRIV unsigned int rdc2_channel_mode(unsigned int max_channel_index);
 SR_PRIV unsigned int rdc2_unitsize(unsigned int num_channels);
 SR_PRIV uint64_t rdc2_max_samplerate(unsigned int num_channels,
