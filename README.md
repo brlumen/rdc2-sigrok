@@ -45,6 +45,14 @@ sigrok-cli --driver chipdip-rdc2-0064 -c samplerate=100k --channels D0,D1,D2,D3,
 pulseview
 ```
 
+Notes for PulseView: start it as `pulseview -d chipdip-rdc2-0064` and the
+device is connected automatically. While it is connected the serial port is
+held exclusively, so "Scan for devices" in the *Connect to Device* dialog
+reports nothing ("Resource busy" in the log) — that is expected; the device is
+already selected in the toolbar. In sigrok-cli use a comma-separated channel
+list (`--channels D0,D1,D2`); ranges like `D0-D7` are not parsed for
+non-numeric channel names.
+
 ## License
 
 Apache-2.0, except `sigrok/` which is GPL-3.0-or-later. Details in
