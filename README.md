@@ -22,7 +22,28 @@ Apache License 2.0; see [NOTICE](NOTICE).
 
 ## Status
 
-Work in progress. See the sections above for what already works.
+Verified on hardware (firmware 0.2, macOS 26, Apple silicon):
+
+* `rdc2la` — buffer and stream capture, triggers, PWM generator, `.sr` output
+  readable by sigrok-cli/PulseView.
+* libsigrok driver — scan, buffer and stream capture, channel triggers,
+  through sigrok-cli and PulseView built by `scripts/build-macos.sh`.
+
+## Quick start
+
+```sh
+# Python tool
+cd python && python3 -m venv .venv && .venv/bin/pip install -e .
+.venv/bin/rdc2la id
+.venv/bin/rdc2la capture --mode stream --rate 100k --channels 8 --duration 10m -o capture.sr
+
+# sigrok stack with the driver (installs into ~/.local/openla)
+scripts/build-macos.sh
+. scripts/env.sh
+sigrok-cli --driver chipdip-rdc2-0064 --scan
+sigrok-cli --driver chipdip-rdc2-0064 -c samplerate=100k --channels D0,D1,D2,D3,D4,D5,D6,D7 --samples 10000 -O srzip -o test.sr
+pulseview
+```
 
 ## License
 
