@@ -48,8 +48,10 @@ pulseview
 Notes for PulseView: start it as `pulseview -d chipdip-rdc2-0064` and the
 device is connected automatically. While it is connected the serial port is
 held exclusively, so "Scan for devices" in the *Connect to Device* dialog
-reports nothing ("Resource busy" in the log) — that is expected; the device is
-already selected in the toolbar. In sigrok-cli use a comma-separated channel
+reports nothing ("Resource busy" in the log) and removes the device from the
+toolbar list — do not rescan; the device is already selected in the toolbar.
+Closing the session tab does not release the port either: quit PulseView and
+start it again if the device is gone from the list. In sigrok-cli use a comma-separated channel
 list (`--channels D0,D1,D2`); ranges like `D0-D7` are not parsed for
 non-numeric channel names.
 
