@@ -1,0 +1,22 @@
+OpenLA — open-source tooling for the ChipDip RDC2-0064 logic analyzer.
+Copyright (c) 2026 BrLumen
+
+This project is based on the RDC2-0064 firmware and "Logic Analyzer"
+application sources published by ЗАО «ЧИП и ДИП» (ChipDip) under the
+Apache License, Version 2.0:
+
+  Original project: https://www.chipdip.ru/product/rdc2-0064-logic-analyzer
+  Source drops and licensing statement (2022-07-28) by the vendor:
+  https://forum.chipstudio.ru/index.php?threads/rdc2-0064-logicheskij-analizator-32-kanala-max-72-mgc-max.149/
+
+Vendor conditions for derived works, reproduced here and honoured by this
+project: state ChipDip as the original author, link to the original project,
+and publish the derived variant in the vendor forum thread above.
+
+The unmodified vendor sources are kept under third_party/chipdip/ (converted
+to UTF-8 / LF only). Everything else in this repository is original work.
+
+Licensing of this repository:
+  * All directories except sigrok/ — Apache License 2.0 (see LICENSE).
+  * sigrok/ (libsigrok driver, a derived work of libsigrok) —
+    GNU General Public License v3.0 or later (see sigrok/LICENSE).

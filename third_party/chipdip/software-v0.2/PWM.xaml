@@ -1,0 +1,23 @@
+﻿<UserControl x:Class="RDC2_0064.PWM"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" 
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008" 
+             xmlns:local="clr-namespace:RDC2_0064"
+             mc:Ignorable="d">
+    <StackPanel>
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="0,0,0,5">
+            <Label Content="Frequency" Style="{StaticResource LabelStyle}" Margin="0,0,3,0"/>
+            <TextBox x:Name="InputFreqBox" Text="1000" Width="70" VerticalAlignment="Center" PreviewTextInput="InputFrequency_PreviewInput"/>
+            <ComboBox ItemsSource="{Binding FrequencyUnits}" SelectedIndex="{Binding SelectedUnits}" Width="50" Margin="2,0,0,0" SelectionChanged="FreqUnits_SelectionChanged"/>
+        </StackPanel>
+        <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+            <Label Content="Error:" Style="{StaticResource LabelStyle}" Margin="0,0,3,0"/>
+            <Label x:Name="FreqError" Content="0" Style="{StaticResource LabelStyle}" Margin="0,0,3,0"/>
+            <Label Content=" (" Style="{StaticResource LabelStyle}"/>
+            <Label x:Name="RealFreq" Content="1000" Style="{StaticResource LabelStyle}"/>
+            <Label Content=" Hz)" Style="{StaticResource LabelStyle}"/>
+        </StackPanel>
+        <ItemsControl x:Name="PWMItems" HorizontalAlignment="Right" VerticalAlignment="Top"/>
+    </StackPanel>
+</UserControl>
