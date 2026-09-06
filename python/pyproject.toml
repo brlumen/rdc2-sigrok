@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rdc2la"
+version = "0.1.0"
+description = "Host library and CLI for the ChipDip RDC2-0064 USB logic analyzer"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [{ name = "BrLumen", email = "igflocal@gmail.com" }]
+keywords = ["logic-analyzer", "rdc2-0064", "chipdip", "sigrok", "stm32"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: System :: Hardware :: Hardware Drivers",
+]
+dependencies = ["pyserial>=3.5"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+rdc2la = "rdc2la.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/BrLumen/OpenLA"
+
+[tool.setuptools]
+packages = ["rdc2la"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
