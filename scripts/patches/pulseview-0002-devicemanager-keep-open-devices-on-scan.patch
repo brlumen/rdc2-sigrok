@@ -1,8 +1,7 @@
-From a7ed25053f78c47e512121ae29e0a6574978f550 Mon Sep 17 00:00:00 2001
+From 3259b1f40daa6e3837ae1b46929a9c8dcdad0fd1 Mon Sep 17 00:00:00 2001
 From: BrLumen <igflocal@gmail.com>
 Date: Sun, 6 Sep 2026 20:06:32 +0700
-Subject: [PATCH 2/2] DeviceManager: don't drop open devices during a driver
- scan
+Subject: [PATCH] DeviceManager: don't drop open devices during a driver scan
 
 driver_scan() removes every device of the driver from the device list
 before scanning, assuming the scan will find them again. A device that is
@@ -17,16 +16,15 @@ device again), and return the kept devices together with the new ones so
 that the connect dialog still lists them. Add HardwareDevice::is_open()
 for that.
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Signed-off-by: BrLumen <igflocal@gmail.com>
 ---
- pv/devicemanager.cpp          | 37 ++++++++++++++++++++++++++++++-----
+ pv/devicemanager.cpp          | 40 ++++++++++++++++++++++++++++++-----
  pv/devices/hardwaredevice.cpp |  5 +++++
  pv/devices/hardwaredevice.hpp |  5 +++++
- 3 files changed, 42 insertions(+), 5 deletions(-)
+ 3 files changed, 45 insertions(+), 5 deletions(-)
 
 diff --git a/pv/devicemanager.cpp b/pv/devicemanager.cpp
-index 09d9014b..81bbeba5 100644
+index 09d9014b..bc173e3b 100644
 --- a/pv/devicemanager.cpp
 +++ b/pv/devicemanager.cpp
 @@ -20,6 +20,7 @@
@@ -45,7 +43,7 @@ index 09d9014b..81bbeba5 100644
  using std::bind;
  using std::list;
  using std::map;
-@@ -249,24 +251,49 @@ DeviceManager::driver_scan(
+@@ -249,24 +251,52 @@ DeviceManager::driver_scan(
  		return driver_devices;
  
  	// Remove any device instances from this driver from the device
@@ -65,6 +63,9 @@ index 09d9014b..81bbeba5 100644
 +		}
 +		return true;
 +	});
++
++	// If the scan fails, the kept devices are still what this driver has.
++	driver_devices = open_devices;
  
  	try {
  		// Do the scan
