@@ -24,7 +24,13 @@ from .device import (
 )
 from .protocol import SamplingMode, Trigger
 from .srfile import BinWriter, SrWriter, writer_for_path
-from .transport import FakeTransport, LoggingTransport, SerialTransport
+from .transport import (
+    FakeTransport,
+    LoggingTransport,
+    SerialTransport,
+    UsbTransport,
+    find_usb_devices,
+)
 
 __version__ = "0.1.0"
 
@@ -43,6 +49,8 @@ __all__ = [
     "BinWriter",
     "writer_for_path",
     "SerialTransport",
+    "UsbTransport",
     "FakeTransport",
     "LoggingTransport",
+    "find_usb_devices",
 ]

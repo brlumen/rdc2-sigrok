@@ -23,6 +23,7 @@ dependencies = ["pyserial>=3.5"]
 
 [project.optional-dependencies]
 dev = ["pytest"]
+usb = ["pyusb>=1.2.1", "libusb-package>=1.0.26"]
 
 [project.scripts]
 rdc2la = "rdc2la.cli:main"

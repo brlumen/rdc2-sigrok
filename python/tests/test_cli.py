@@ -330,3 +330,29 @@ def test_cli_reset(monkeypatch, capsys):
     use_fake_device(monkeypatch)
     assert cli.main(["reset"]) == 0
     assert "device stopped" in capsys.readouterr().out
+
+
+def test_cli_ports_lists_both_transports(monkeypatch, capsys):
+    from rdc2la.device import Device
+
+    monkeypatch.setattr(Device, "find_ports", staticmethod(lambda: ["COM7"]))
+    monkeypatch.setattr(Device, "find_usb", staticmethod(lambda: ["usb:1.4"]))
+    assert cli.main(["ports"]) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        "COM7  (serial)",
+        "usb:1.4  (libusb)",
+    ]
+
+
+def test_cli_ports_without_a_device(monkeypatch, capsys):
+    from rdc2la.device import Device
+
+    monkeypatch.setattr(Device, "find_ports", staticmethod(lambda: []))
+    monkeypatch.setattr(Device, "find_usb", staticmethod(lambda: []))
+    assert cli.main(["ports"]) == 1
+    assert "serial port or via libusb" in capsys.readouterr().out
+
+
+def test_cli_port_option_takes_a_usb_selector():
+    assert parse(["-p", "usb:1.4", "id"]).port == "usb:1.4"
+    assert "usb[:bus.address]" in cli.build_parser().format_help()

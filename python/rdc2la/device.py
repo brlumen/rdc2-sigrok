@@ -18,11 +18,19 @@ from typing import Callable, Iterator, Mapping, Sequence
 
 from . import protocol as pr
 from .protocol import SamplingMode, Trigger
-from .transport import LoggingTransport, SerialTransport, Transport
+from .transport import (
+    LoggingTransport,
+    SerialTransport,
+    Transport,
+    UsbTransport,
+    find_usb_devices,
+    is_usb_port,
+    usb_selector,
+)
 
 __all__ = [
     "Device", "DeviceError", "StuckFirmwareError", "CaptureResult",
-    "StreamCapture", "StreamSummary", "stream_to_writer",
+    "StreamCapture", "StreamSummary", "stream_to_writer", "NO_DEVICE_MESSAGE",
 ]
 
 log = logging.getLogger(__name__)
@@ -39,6 +47,11 @@ OPEN_DRAIN_TIMEOUT = 2.0
 STREAM_TIMEOUT_MARGIN = 2.0
 #: Timeout used while a trigger is armed and nothing has been captured yet.
 ARMED_TIMEOUT = 86_400.0
+#: Shown when neither transport sees a device.
+NO_DEVICE_MESSAGE = (
+    f"no RDC2-0064 (USB {pr.USB_VID:04x}:{pr.USB_PID:04x}) found on a serial port "
+    "or via libusb; on Windows install the vendor libusb driver or bind usbser"
+)
 
 
 class DeviceError(Exception):
@@ -92,7 +105,7 @@ class StreamSummary:
 
 
 class Device:
-    """A single RDC2-0064 attached to a serial transport."""
+    """A single RDC2-0064 attached to a serial or libusb transport."""
 
     def __init__(self, transport: Transport, *, port: str | None = None) -> None:
         self._transport = transport
@@ -125,6 +138,15 @@ class Device:
         ]
         return sorted(filtered, key=lambda name: ("/cu." not in name, name))
 
+    @staticmethod
+    def find_usb() -> list[str]:
+        """Devices reachable through libusb, as ``usb:<bus>.<address>``.
+
+        Only devices no kernel CDC-ACM driver owns are listed; those are
+        served by :meth:`find_ports`.
+        """
+        return [usb_selector(device) for device in find_usb_devices()]
+
     @classmethod
     def open(
         cls,
@@ -133,24 +155,43 @@ class Device:
         transport: Transport | None = None,
         log_packets: bool = False,
     ) -> "Device":
-        """Open a device and run the recommended start-up sequence (spec 7.3)."""
+        """Open a device and run the recommended start-up sequence (spec 7.3).
+
+        ``port`` is a serial port name, ``usb`` (first libusb device) or
+        ``usb:<bus>.<address>``.  Without it, serial ports are tried first
+        and libusb devices after them.
+        """
         if transport is None:
             if port is None:
-                ports = cls.find_ports()
-                if not ports:
-                    raise DeviceError(
-                        "no RDC2-0064 found "
-                        f"(USB {pr.USB_VID:04x}:{pr.USB_PID:04x}); is it plugged in?"
-                    )
-                port = ports[0]
-                if len(ports) > 1:
+                candidates = cls.find_ports() + cls.find_usb()
+                if not candidates:
+                    raise DeviceError(NO_DEVICE_MESSAGE)
+                port = candidates[0]
+                if len(candidates) > 1:
                     log.info("several devices found, using %s", port)
-            transport = SerialTransport(port)
+            if is_usb_port(port):
+                transport = cls._open_usb(port)
+                port = transport.port
+            else:
+                transport = SerialTransport(port)
             if log_packets:
                 transport = LoggingTransport(transport)
         device = cls(transport, port=port)
         device._handshake()
         return device
+
+    @staticmethod
+    def _open_usb(port: str) -> UsbTransport:
+        """Open the libusb device a ``usb[:bus.address]`` selector names."""
+        devices = find_usb_devices(port)
+        if not devices:
+            raise DeviceError(
+                f"no RDC2-0064 reachable through libusb at {port!r}; "
+                "is pyusb installed and a libusb/WinUSB driver bound?"
+            )
+        if len(devices) > 1:
+            log.info("several USB devices found, using %s", usb_selector(devices[0]))
+        return UsbTransport(devices[0])
 
     def _handshake(self) -> None:
         """SAMPLE_STOP, discard leftovers, GET_ID, verify the controller id."""

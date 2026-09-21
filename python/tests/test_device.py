@@ -8,10 +8,11 @@ import struct
 
 import pytest
 
+from rdc2la import device as device_module
 from rdc2la import protocol as pr
 from rdc2la.device import Device, DeviceError, StuckFirmwareError, stream_to_writer
 from rdc2la.protocol import SamplingMode, Trigger
-from rdc2la.transport import FakeTransport, pattern_sample
+from rdc2la.transport import FakeTransport, pattern_sample, usb_selector
 
 
 class ListWriter:
@@ -448,3 +449,91 @@ def test_close_closes_the_transport():
     device, fake = open_device()
     device.close()
     assert fake.closed
+
+
+# --------------------------------------------------------------------------
+# transport selection: serial ports and libusb (spec 1)
+# --------------------------------------------------------------------------
+
+
+class StubUsbDevice:
+    """A ``usb.core.Device`` as far as the selector logic is concerned."""
+
+    def __init__(self, bus: int, address: int) -> None:
+        self.bus = bus
+        self.address = address
+
+
+class FakeUsbTransport(FakeTransport):
+    """Emulated firmware that answers like a :class:`UsbTransport` would."""
+
+    def __init__(self, device, **kwargs) -> None:
+        super().__init__()
+        self.device = device
+        self.port = usb_selector(device)
+
+
+@pytest.fixture
+def stub_transports(monkeypatch):
+    """Let Device.open() find stub devices on both transports."""
+    state: dict = {"ports": [], "usb": [], "opened": []}
+
+    def serial_transport(port, **kwargs):
+        state["opened"].append(port)
+        return FakeTransport()
+
+    def find_usb_devices(selector=None):
+        return [
+            device
+            for device in state["usb"]
+            if selector in (None, "usb", usb_selector(device))
+        ]
+
+    monkeypatch.setattr(device_module, "SerialTransport", serial_transport)
+    monkeypatch.setattr(device_module, "UsbTransport", FakeUsbTransport)
+    monkeypatch.setattr(device_module, "find_usb_devices", find_usb_devices)
+    monkeypatch.setattr(Device, "find_ports", staticmethod(lambda: list(state["ports"])))
+    return state
+
+
+def test_find_usb_reports_selectors(monkeypatch):
+    monkeypatch.setattr(
+        device_module,
+        "find_usb_devices",
+        lambda: [StubUsbDevice(1, 4), StubUsbDevice(3, 11)],
+    )
+    assert Device.find_usb() == ["usb:1.4", "usb:3.11"]
+
+
+def test_open_prefers_a_serial_port(stub_transports):
+    stub_transports["ports"] = ["/dev/cu.usbmodem1"]
+    stub_transports["usb"] = [StubUsbDevice(1, 4)]
+    device = Device.open()
+    assert device.port == "/dev/cu.usbmodem1"
+    assert stub_transports["opened"] == ["/dev/cu.usbmodem1"]
+
+
+def test_open_falls_back_to_libusb(stub_transports):
+    stub_transports["usb"] = [StubUsbDevice(1, 4)]
+    device = Device.open()
+    assert device.port == "usb:1.4"
+    assert isinstance(device._transport, FakeUsbTransport)
+
+
+def test_open_accepts_a_usb_selector(stub_transports):
+    stub_transports["ports"] = ["/dev/cu.usbmodem1"]
+    stub_transports["usb"] = [StubUsbDevice(1, 4), StubUsbDevice(2, 9)]
+    assert Device.open("usb:2.9").port == "usb:2.9"
+    assert Device.open("usb").port == "usb:1.4"
+    assert stub_transports["opened"] == []  # no serial port was touched
+
+
+def test_open_rejects_an_unknown_usb_selector(stub_transports):
+    stub_transports["usb"] = [StubUsbDevice(1, 4)]
+    with pytest.raises(DeviceError, match="libusb"):
+        Device.open("usb:9.9")
+
+
+def test_open_without_any_device(stub_transports):
+    with pytest.raises(DeviceError, match="serial port or via libusb"):
+        Device.open()

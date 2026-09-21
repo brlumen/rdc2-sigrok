@@ -2,9 +2,10 @@
 # Copyright (c) 2026 BrLumen
 """Byte transports for the RDC2-0064.
 
-``SerialTransport`` talks to the real CDC-ACM device, ``FakeTransport``
-emulates the firmware state machine closely enough for tests, and
-``LoggingTransport`` wraps either of them to hex-dump the wire traffic.
+``SerialTransport`` talks to the CDC-ACM device through a tty and
+``UsbTransport`` through libusb, for devices no kernel serial driver owns.
+``FakeTransport`` emulates the firmware state machine closely enough for
+tests, and ``LoggingTransport`` wraps any of them to hex-dump the traffic.
 """
 
 from __future__ import annotations
@@ -16,7 +17,10 @@ from typing import Protocol
 
 from . import protocol as pr
 
-__all__ = ["Transport", "SerialTransport", "FakeTransport", "LoggingTransport"]
+__all__ = [
+    "Transport", "SerialTransport", "UsbTransport", "FakeTransport",
+    "LoggingTransport", "find_usb_devices", "usb_selector", "is_usb_port",
+]
 
 log = logging.getLogger(__name__)
 wire_log = logging.getLogger("rdc2la.wire")
@@ -116,6 +120,198 @@ class SerialTransport:
     def close(self) -> None:
         try:
             self._serial.close()
+        except Exception:  # pragma: no cover - closing must never raise
+            log.debug("closing %s failed", self.port, exc_info=True)
+
+
+# --------------------------------------------------------------------------
+# libusb transport
+# --------------------------------------------------------------------------
+
+#: CDC data interface and its bulk endpoints, as the vendor application uses
+#: them (``ClaimInterface(1)``, reader/writer on ``Ep01``).
+USB_INTERFACE = 1
+USB_EP_OUT = 0x01
+USB_EP_IN = 0x81
+#: High Speed bulk packet size; a reply is read with one more packet's worth
+#: of buffer so that the trailing zero-length packet ends the transfer.
+USB_MAX_PACKET = 512
+
+
+def _usb_timeout_ms(timeout: float) -> int:
+    """Seconds to whole milliseconds, never 0: libusb reads that as 'forever'."""
+    return max(1, round(timeout * 1000))
+
+
+def _usb_backend():
+    """libusb-1.0 backend; ``libusb-package`` ships the DLL on Windows."""
+    try:
+        import libusb_package
+    except ImportError:
+        return None  # let pyusb look for a system-wide libusb-1.0
+    return libusb_package.get_libusb1_backend()
+
+
+def usb_selector(device) -> str:
+    """Stable name of a libusb device: ``usb:<bus>.<address>``."""
+    return f"usb:{device.bus}.{device.address}"
+
+
+def is_usb_port(port: str) -> bool:
+    """Is ``port`` a libusb selector (``usb`` or ``usb:<bus>.<address>``)?"""
+    name = port.strip().lower()
+    return name == "usb" or name.startswith("usb:")
+
+
+def _parse_usb_selector(selector: str | None) -> tuple[int, int] | None:
+    """``usb`` / ``None`` to ``None``, ``usb:<bus>.<address>`` to a pair of ints."""
+    if selector is None:
+        return None
+    name = selector.strip().lower()
+    if name == "usb":
+        return None
+    bus, _, address = name.removeprefix("usb:").partition(".")
+    if not name.startswith("usb:") or not bus.isdigit() or not address.isdigit():
+        raise ValueError(
+            f"invalid USB selector {selector!r}, expected usb or usb:<bus>.<address>"
+        )
+    return int(bus), int(address)
+
+
+def _usable_via_libusb(device) -> bool:
+    """True when no OS driver owns the data interface of ``device``."""
+    import usb.core
+    import usb.util
+
+    try:
+        return not device.is_kernel_driver_active(USB_INTERFACE)
+    except NotImplementedError:
+        return True  # Windows backends do not answer the question
+    except usb.core.USBError:
+        return False  # cannot be opened at all, so not usable either
+    finally:
+        # The query needs a device handle; do not keep it around.
+        usb.util.dispose_resources(device)
+
+
+def find_usb_devices(selector: str | None = None) -> list:
+    """RDC2-0064s that libusb can talk to, optionally filtered by ``selector``.
+
+    Devices whose data interface is owned by a kernel CDC-ACM driver belong to
+    :class:`SerialTransport` and are skipped.  The list is empty when pyusb or
+    libusb-1.0 is missing: the serial transport is the default on every OS that
+    binds CDC-ACM itself.
+    """
+    wanted = _parse_usb_selector(selector)
+    try:
+        import usb.core
+    except ImportError:
+        log.info("pyusb is not installed; install rdc2la[usb] for the USB transport")
+        return []
+    try:
+        devices = [
+            device
+            for device in usb.core.find(
+                find_all=True,
+                idVendor=pr.USB_VID,
+                idProduct=pr.USB_PID,
+                backend=_usb_backend(),
+            )
+            if _usable_via_libusb(device)
+        ]
+    except usb.core.NoBackendError:
+        log.warning("pyusb found no libusb-1.0 library; install libusb-package")
+        return []
+    if wanted is not None:
+        devices = [d for d in devices if (d.bus, d.address) == wanted]
+    return sorted(devices, key=lambda device: (device.bus, device.address))
+
+
+class UsbTransport:
+    """pyusb/libusb transport for a device no kernel serial driver owns.
+
+    This is the Windows path: the vendor driver (libusb0.sys) is bound to the
+    whole device, and WinUSB/libusbK work the same way.  Only the two bulk
+    endpoints of the CDC data interface are used - every EP0 control transfer
+    has a ~1/1000 chance of killing the firmware's USB stack (spec 7.3), so
+    this transport issues none: no ``set_configuration()``, no string
+    descriptors, no ``reset()``, and no kernel driver is ever detached.
+    """
+
+    def __init__(self, device, *, write_timeout: float = 2.0) -> None:
+        import usb.util
+
+        self.device = device
+        self.port = usb_selector(device)
+        self._write_timeout_ms = _usb_timeout_ms(write_timeout)
+        usb.util.claim_interface(device, USB_INTERFACE)
+        self._claimed = True
+
+    def write_packet(self, data: bytes) -> None:
+        """Write one command packet as a single bulk OUT transfer (spec 2.1)."""
+        if len(data) != pr.CMD_PACKET_SIZE:
+            raise ValueError(
+                f"command packets are {pr.CMD_PACKET_SIZE} bytes, got {len(data)}"
+            )
+        written = self.device.write(USB_EP_OUT, data, self._write_timeout_ms)
+        if written != len(data):
+            raise OSError(f"short write: {written} of {len(data)} bytes")
+
+    def read_exact(self, size: int, timeout: float) -> bytes:
+        """Read exactly ``size`` bytes or raise :class:`TimeoutError`.
+
+        Every reply is a multiple of 512 bytes, so the device terminates it
+        with a zero-length packet (spec 2.2).  A tty hides that packet, libusb
+        does not: asking for ``size + 512`` bytes consumes it within the same
+        transfer, because the ZLP is a short packet and ends the read after
+        exactly ``size`` bytes.
+        """
+        import usb.core
+
+        try:
+            data = self.device.read(
+                USB_EP_IN, size + USB_MAX_PACKET, _usb_timeout_ms(timeout)
+            )
+        except usb.core.USBTimeoutError:
+            data = b""
+        if len(data) < size:
+            raise TimeoutError(
+                f"timed out after {timeout:g} s with {len(data)} of {size} bytes"
+            )
+        return bytes(data[:size])
+
+    def drain(self, timeout: float, quiet: float = 0.3) -> bytes:
+        """Read and return whatever arrives within ``timeout`` seconds.
+
+        Returns early once the device has been quiet for ``quiet`` seconds
+        after sending something.
+        """
+        import usb.core
+
+        size = pr.STREAM_PACKET_SIZE + USB_MAX_PACKET  # a stale stream packet + ZLP
+        buf = bytearray()
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return bytes(buf)
+            try:
+                buf += self.device.read(
+                    USB_EP_IN, size, _usb_timeout_ms(min(remaining, quiet))
+                )
+            except usb.core.USBTimeoutError:
+                if buf:
+                    return bytes(buf)
+
+    def close(self) -> None:
+        import usb.util
+
+        if not self._claimed:
+            return
+        self._claimed = False
+        try:
+            usb.util.release_interface(self.device, USB_INTERFACE)
+            usb.util.dispose_resources(self.device)
         except Exception:  # pragma: no cover - closing must never raise
             log.debug("closing %s failed", self.port, exc_info=True)
 

@@ -15,7 +15,13 @@ import time
 from typing import Sequence
 
 from . import protocol as pr
-from .device import Device, DeviceError, StreamSummary, stream_to_writer
+from .device import (
+    NO_DEVICE_MESSAGE,
+    Device,
+    DeviceError,
+    StreamSummary,
+    stream_to_writer,
+)
 from .protocol import SamplingMode, Trigger
 from .srfile import writer_for_path
 
@@ -194,13 +200,13 @@ def _open_device(args) -> Device:
 
 
 def cmd_ports(args) -> int:
-    ports = Device.find_ports()
-    if not ports:
-        print("no RDC2-0064 found "
-              f"(USB {pr.USB_VID:04x}:{pr.USB_PID:04x})")
+    found = [(name, "serial") for name in Device.find_ports()]
+    found += [(name, "libusb") for name in Device.find_usb()]
+    if not found:
+        print(NO_DEVICE_MESSAGE)
         return 1
-    for port in ports:
-        print(port)
+    for name, kind in found:
+        print(f"{name}  ({kind})")
     return 0
 
 
@@ -452,7 +458,12 @@ def build_parser() -> argparse.ArgumentParser:
         prog="rdc2la",
         description="Control the ChipDip RDC2-0064 logic analyzer.",
     )
-    parser.add_argument("-p", "--port", help="serial port; autodetected when omitted")
+    parser.add_argument(
+        "-p",
+        "--port",
+        help="serial port, or usb[:bus.address] for a libusb device "
+        "(Windows vendor driver / WinUSB); autodetected when omitted",
+    )
     parser.add_argument(
         "-v",
         "--verbose",
@@ -462,9 +473,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    subparsers.add_parser("ports", help="list connected RDC2-0064 devices").set_defaults(
-        func=cmd_ports
-    )
+    subparsers.add_parser(
+        "ports", help="list connected RDC2-0064 devices (serial ports and libusb)"
+    ).set_defaults(func=cmd_ports)
     subparsers.add_parser("id", help="show controller/firmware identification").set_defaults(
         func=cmd_id
     )
