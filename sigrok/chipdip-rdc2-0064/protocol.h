@@ -21,10 +21,17 @@
  * ChipDip RDC2-0064 logic analyzer (32 channels, up to 72MHz).
  *
  * Hardware: STM32F722 @216MHz with an external USB HS PHY. The device
- * enumerates as a CDC-ACM serial port (VID 0x0483, PID 0xa210) and needs no
- * vendor driver on Linux/macOS. Channels 0-15 are sampled by TIM1+DMA2,
- * channels 16-31 by TIM8+DMA2, and an external EDGE input (TIM2) can start
- * or gate the whole capture. Sample memory is 240640 bytes.
+ * enumerates as a CDC-ACM composite device (VID 0x0483, PID 0xa210) and
+ * needs no vendor driver on Linux/macOS. Channels 0-15 are sampled by
+ * TIM1+DMA2, channels 16-31 by TIM8+DMA2, and an external EDGE input (TIM2)
+ * can start or gate the whole capture. Sample memory is 240640 bytes.
+ *
+ * Two transports carry the same packets (spec 2.7). Where the OS binds a
+ * serial driver to the CDC function - Linux, macOS, Windows with usbser.sys
+ * - the device is used through the resulting serial port. Where it does not
+ * - Windows with the vendor's libusb0 package, or with WinUSB - the bulk
+ * endpoints of the CDC data interface are used directly through libusb.
+ * sdi->inst_type says which one an instance uses.
  *
  * Protocol summary (the authoritative description including all firmware
  * quirks is docs/protocol.md of the OpenLA project,
@@ -73,14 +80,35 @@
 #define RDC2_VENDOR			"ChipDip"
 #define RDC2_MODEL			"RDC2-0064"
 
-/* The firmware ignores line coding, DTR and RTS; any setting works. */
-#define RDC2_SERIALCOMM			"115200/8n1/dtr=1/rts=0/flow=0"
+/*
+ * The firmware ignores line coding, DTR and RTS, so the port is left with
+ * whatever the OS sets on open and no serialcomm is applied by default.
+ * That is deliberate: every line-coding change costs a burst of control
+ * transfers (about ten on Windows), and the firmware's USB stack gives up
+ * for good after a few hundred of those (docs/protocol.md 7.3). A user
+ * supplied serialcomm scan option is still honoured. The libusb transport
+ * has no equivalent knob and needs none: it issues no control transfer at
+ * all after libusb_open(), which is why it is the safer of the two on
+ * Windows.
+ */
 
 /* Transport (spec 2). */
 #define RDC2_CMD_SIZE			64
 #define RDC2_REPLY_SIZE			512
 #define RDC2_BUFFER_REPLY_SIZE		240640
 #define RDC2_STREAM_PACKET_SIZE		16384
+
+/*
+ * USB transport (spec 2.7). Interface 1 is the CDC data interface, the one
+ * the vendor application claims as well; interface 0 (CDC control) is left
+ * alone. The bulk endpoints run at High Speed, so every reply is a multiple
+ * of the max packet size and the device follows it with a zero-length
+ * packet (spec 2.2) that every read has to consume.
+ */
+#define RDC2_USB_INTERFACE		1
+#define RDC2_USB_EP_OUT			0x01
+#define RDC2_USB_EP_IN			0x81
+#define RDC2_USB_MAX_PACKET		512
 
 /* Sample memory, and the largest capture the vendor software permits. */
 #define RDC2_SAMPLE_MEM_SIZE		240640
@@ -284,7 +312,11 @@ struct dev_context {
 	gboolean sources_added;
 	gboolean stop_req;
 	gboolean send_trigger;
-	/* Reply accumulator; rx_want is 0 while no reply is outstanding. */
+	/*
+	 * Reply accumulator; rx_want is 0 while no reply is outstanding.
+	 * rx_buf always holds one max packet more than the largest reply, so
+	 * that a USB read can swallow the trailing zero-length packet.
+	 */
 	uint8_t *rx_buf;
 	size_t rx_alloc;
 	size_t rx_want;
@@ -292,6 +324,17 @@ struct dev_context {
 	unsigned int rx_timeout_ms;
 	int64_t rx_deadline;
 	int64_t poll_due;
+	/*
+	 * USB transport: the transfer that collects the outstanding reply,
+	 * plus what its callback saw. The callback must not call libusb
+	 * again, so it only records the outcome and rdc2_timer_tick() acts
+	 * on it.
+	 */
+	struct libusb_transfer *xfer;
+	gboolean xfer_active;
+	gboolean xfer_done;
+	int xfer_status;
+	int xfer_length;
 	/* Scratch buffer for de-interleaved samples handed to the session. */
 	uint8_t *feed_buf;
 	size_t feed_alloc;
@@ -335,12 +378,12 @@ SR_PRIV size_t rdc2_deinterleave_buffer(const struct rdc2_capture *cap,
 SR_PRIV size_t rdc2_decode_stream_packet(const struct rdc2_capture *cap,
 	const uint8_t *src, uint8_t *dst);
 
-/* Transport. */
-SR_PRIV int rdc2_send_command(struct sr_serial_dev_inst *serial,
+/* Transport; dispatched on sdi->inst_type. */
+SR_PRIV int rdc2_send_command(const struct sr_dev_inst *sdi,
 	uint8_t module, uint8_t cmd);
-SR_PRIV int rdc2_send_packet(struct sr_serial_dev_inst *serial,
+SR_PRIV int rdc2_send_packet(const struct sr_dev_inst *sdi,
 	const uint8_t *packet);
-SR_PRIV int rdc2_probe(struct sr_serial_dev_inst *serial,
+SR_PRIV int rdc2_probe(const struct sr_dev_inst *sdi,
 	struct rdc2_device_id *id);
 
 /* Acquisition. */

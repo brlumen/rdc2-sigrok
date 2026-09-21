@@ -24,6 +24,9 @@
 
 #define RDC2_DEFAULT_SAMPLERATE		SR_MHZ(1)
 
+/* VID.PID form of the device address, as sr_usb_find() parses it. */
+#define RDC2_USB_CONN_FMT		"%04x.%04x"
+
 static const uint32_t scanopts[] = {
 	SR_CONF_CONN,
 	/* The firmware ignores line settings, but the port has to be opened. */
@@ -86,46 +89,26 @@ static int dev_clear(const struct sr_dev_driver *di)
 	return std_dev_clear_with_callback(di, clear_helper);
 }
 
-static struct sr_dev_inst *probe_port(const char *port, const char *serialcomm)
+/* Fill in a device instance that answered SYS_CMD_GET_ID. */
+static void complete_sdi(struct sr_dev_inst *sdi,
+	const struct rdc2_device_id *id)
 {
-	struct sr_dev_inst *sdi;
-	struct sr_serial_dev_inst *serial;
 	struct dev_context *devc;
-	struct rdc2_device_id id;
 	char name[8];
 	unsigned int i;
-	int ret;
 
-	serial = sr_serial_dev_inst_new(port, serialcomm);
-	if (serial_open(serial, SERIAL_RDWR) != SR_OK) {
-		sr_serial_dev_inst_free(serial);
-		return NULL;
-	}
-
-	sr_info("Probing %s.", port);
-	ret = rdc2_probe(serial, &id);
-	serial_close(serial);
-	if (ret != SR_OK) {
-		sr_serial_dev_inst_free(serial);
-		return NULL;
-	}
-
-	sdi = g_malloc0(sizeof(*sdi));
 	sdi->status = SR_ST_INACTIVE;
-	sdi->inst_type = SR_INST_SERIAL;
-	sdi->conn = serial;
-	sdi->connection_id = g_strdup(serial->port);
 	sdi->vendor = g_strdup(RDC2_VENDOR);
 	sdi->model = g_strdup(RDC2_MODEL);
-	if (id.firmware[2] || id.firmware[3]) {
-		sdi->version = g_strdup_printf("%u.%u.%u.%u", id.firmware[0],
-			id.firmware[1], id.firmware[2], id.firmware[3]);
+	if (id->firmware[2] || id->firmware[3]) {
+		sdi->version = g_strdup_printf("%u.%u.%u.%u", id->firmware[0],
+			id->firmware[1], id->firmware[2], id->firmware[3]);
 	} else {
-		sdi->version = g_strdup_printf("%u.%u", id.firmware[0],
-			id.firmware[1]);
+		sdi->version = g_strdup_printf("%u.%u", id->firmware[0],
+			id->firmware[1]);
 	}
-	sr_info("Found %s %s, firmware %s, hardware %u.", sdi->vendor,
-		sdi->model, sdi->version, id.hardware);
+	sr_info("Found %s %s on %s, firmware %s, hardware %u.", sdi->vendor,
+		sdi->model, sdi->connection_id, sdi->version, id->hardware);
 
 	for (i = 0; i < RDC2_MAX_CHANNELS; i++) {
 		g_snprintf(name, sizeof(name), "D%u", i);
@@ -140,16 +123,126 @@ static struct sr_dev_inst *probe_port(const char *port, const char *serialcomm)
 	devc->trigger_slope = RDC2_SLOPE_RISING;
 	devc->state = RDC2_STATE_IDLE;
 	sdi->priv = devc;
+}
+
+static struct sr_dev_inst *probe_port(const char *port, const char *serialcomm)
+{
+	struct sr_dev_inst *sdi;
+	struct sr_serial_dev_inst *serial;
+	struct rdc2_device_id id;
+	int ret;
+
+	serial = sr_serial_dev_inst_new(port, serialcomm);
+	if (serial_open(serial, SERIAL_RDWR) != SR_OK) {
+		sr_serial_dev_inst_free(serial);
+		return NULL;
+	}
+
+	sdi = g_malloc0(sizeof(*sdi));
+	sdi->inst_type = SR_INST_SERIAL;
+	sdi->conn = serial;
+	sdi->connection_id = g_strdup(serial->port);
+
+	sr_info("Probing %s.", port);
+	ret = rdc2_probe(sdi, &id);
+	serial_close(serial);
+	if (ret != SR_OK) {
+		sr_serial_dev_inst_free(serial);
+		g_free(sdi->connection_id);
+		g_free(sdi);
+		return NULL;
+	}
+
+	complete_sdi(sdi, &id);
 
 	return sdi;
 }
 
+/*
+ * Probe a device that no serial driver owns. The caller keeps ownership of
+ * usb unless a device instance is returned.
+ */
+static struct sr_dev_inst *probe_usb(struct sr_context *ctx,
+	struct sr_usb_dev_inst *usb)
+{
+	struct sr_dev_inst *sdi;
+	struct rdc2_device_id id;
+	int ret;
+
+	if (sr_usb_open(ctx->libusb_ctx, usb) != SR_OK)
+		return NULL;
+
+	/*
+	 * A board that a kernel serial driver owns was already offered by the
+	 * serial pass of scan(); claiming it here would list the same device
+	 * twice. This check is what keeps the two passes apart. Windows has
+	 * no such concept and answers LIBUSB_ERROR_NOT_SUPPORTED, which means
+	 * "no kernel driver" there.
+	 */
+	ret = libusb_kernel_driver_active(usb->devhdl, RDC2_USB_INTERFACE);
+	if (ret == 1) {
+		sr_dbg("USB device %d.%d belongs to a kernel driver, the "
+			"serial scan covers it.", usb->bus, usb->address);
+		sr_usb_close(usb);
+		return NULL;
+	}
+	if (ret < 0 && ret != LIBUSB_ERROR_NOT_SUPPORTED) {
+		sr_dbg("Cannot query the kernel driver of USB device %d.%d: "
+			"%s.", usb->bus, usb->address, libusb_error_name(ret));
+		sr_usb_close(usb);
+		return NULL;
+	}
+
+	/* Interface 1 is the CDC data interface (spec 2.7). */
+	if ((ret = libusb_claim_interface(usb->devhdl,
+			RDC2_USB_INTERFACE)) < 0) {
+		sr_dbg("Cannot claim interface %d of USB device %d.%d: %s.",
+			RDC2_USB_INTERFACE, usb->bus, usb->address,
+			libusb_error_name(ret));
+		sr_usb_close(usb);
+		return NULL;
+	}
+
+	sdi = g_malloc0(sizeof(*sdi));
+	sdi->inst_type = SR_INST_USB;
+	sdi->conn = usb;
+	sdi->connection_id = g_strdup_printf("%d.%d", usb->bus, usb->address);
+
+	sr_info("Probing USB device %s.", sdi->connection_id);
+	ret = rdc2_probe(sdi, &id);
+	libusb_release_interface(usb->devhdl, RDC2_USB_INTERFACE);
+	sr_usb_close(usb);
+	if (ret != SR_OK) {
+		g_free(sdi->connection_id);
+		g_free(sdi);
+		return NULL;
+	}
+
+	complete_sdi(sdi, &id);
+
+	return sdi;
+}
+
+/*
+ * A conn= that names a serial port picks the serial transport; anything
+ * else is a USB address for sr_usb_find() (VID.PID or bus.address).
+ */
+static gboolean conn_is_serial(const char *conn)
+{
+	return g_str_has_prefix(conn, "/dev/") ||
+		g_ascii_strncasecmp(conn, "COM", 3) == 0;
+}
+
 static GSList *scan(struct sr_dev_driver *di, GSList *options)
 {
+	struct drv_context *drvc;
 	struct sr_config *src;
 	struct sr_dev_inst *sdi;
-	GSList *l, *ports, *devices;
+	GSList *l, *ports, *conns, *devices;
 	const char *conn, *serialcomm;
+	char usb_conn[16];
+
+	drvc = di->context;
 
 	conn = serialcomm = NULL;
 	for (l = options; l; l = l->next) {
@@ -163,27 +256,45 @@ static GSList *scan(struct sr_dev_driver *di, GSList *options)
 			break;
 		}
 	}
-	if (!serialcomm)
-		serialcomm = RDC2_SERIALCOMM;
-
-	if (conn) {
-		ports = g_slist_append(NULL, g_strdup(conn));
-	} else {
-		/*
-		 * libserialport reports the OS name of the callout device
-		 * (/dev/cu.* on macOS, /dev/ttyACM* on Linux, COM* on
-		 * Windows), which is exactly what serial_open() expects.
-		 */
-		ports = sr_serial_find_usb(RDC2_USB_VID, RDC2_USB_PID);
-	}
-
 	devices = NULL;
-	for (l = ports; l; l = l->next) {
-		sdi = probe_port(l->data, serialcomm);
-		if (sdi)
-			devices = g_slist_append(devices, sdi);
+
+	/* Serial ports first: they are the transport of the stock OS driver. */
+	if (!conn || conn_is_serial(conn)) {
+		if (conn) {
+			ports = g_slist_append(NULL, g_strdup(conn));
+		} else {
+			/*
+			 * libserialport reports the OS name of the callout
+			 * device (/dev/cu.* on macOS, /dev/ttyACM* on Linux,
+			 * COM* on Windows), which is exactly what
+			 * serial_open() expects.
+			 */
+			ports = sr_serial_find_usb(RDC2_USB_VID,
+				RDC2_USB_PID);
+		}
+		for (l = ports; l; l = l->next) {
+			sdi = probe_port(l->data, serialcomm);
+			if (sdi)
+				devices = g_slist_append(devices, sdi);
+		}
+		g_slist_free_full(ports, g_free);
 	}
-	g_slist_free_full(ports, g_free);
+
+	/* Then the boards that no serial driver owns (spec 2.7). */
+	if (!conn || !conn_is_serial(conn)) {
+		g_snprintf(usb_conn, sizeof(usb_conn), RDC2_USB_CONN_FMT,
+			RDC2_USB_VID, RDC2_USB_PID);
+		conns = sr_usb_find(drvc->sr_ctx->libusb_ctx,
+			conn ? conn : usb_conn);
+		for (l = conns; l; l = l->next) {
+			sdi = probe_usb(drvc->sr_ctx, l->data);
+			if (sdi)
+				devices = g_slist_append(devices, sdi);
+			else
+				sr_usb_dev_inst_free(l->data);
+		}
+		g_slist_free(conns);
+	}
 
 	return std_scan_complete(di, devices);
 }
@@ -321,6 +432,50 @@ static int config_list(uint32_t key, GVariant **data,
 	return SR_OK;
 }
 
+static int dev_open(struct sr_dev_inst *sdi)
+{
+	struct drv_context *drvc;
+	struct sr_usb_dev_inst *usb;
+	int ret;
+
+	if (sdi->inst_type == SR_INST_SERIAL)
+		return std_serial_dev_open(sdi);
+
+	/*
+	 * Opening and claiming costs no control transfer at all, which is the
+	 * point of this transport on Windows (spec 7.3).
+	 */
+	drvc = sdi->driver->context;
+	usb = sdi->conn;
+	if ((ret = sr_usb_open(drvc->sr_ctx->libusb_ctx, usb)) != SR_OK)
+		return ret;
+	if ((ret = libusb_claim_interface(usb->devhdl,
+			RDC2_USB_INTERFACE)) < 0) {
+		sr_err("Cannot claim interface %d: %s.", RDC2_USB_INTERFACE,
+			libusb_error_name(ret));
+		sr_usb_close(usb);
+		return SR_ERR;
+	}
+
+	return SR_OK;
+}
+
+static int dev_close(struct sr_dev_inst *sdi)
+{
+	struct sr_usb_dev_inst *usb;
+
+	if (sdi->inst_type == SR_INST_SERIAL)
+		return std_serial_dev_close(sdi);
+
+	usb = sdi->conn;
+	if (!usb->devhdl)
+		return SR_OK;
+	libusb_release_interface(usb->devhdl, RDC2_USB_INTERFACE);
+	sr_usb_close(usb);
+
+	return SR_OK;
+}
+
 static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 {
 	int ret;
@@ -348,8 +503,8 @@ static struct sr_dev_driver chipdip_rdc2_0064_driver_info = {
 	.config_get = config_get,
 	.config_set = config_set,
 	.config_list = config_list,
-	.dev_open = std_serial_dev_open,
-	.dev_close = std_serial_dev_close,
+	.dev_open = dev_open,
+	.dev_close = dev_close,
 	.dev_acquisition_start = dev_acquisition_start,
 	.dev_acquisition_stop = dev_acquisition_stop,
 	.context = NULL,

@@ -38,7 +38,8 @@ firmware.
 2. **Device → host replies are 512 bytes** (`USB_Tx_LENGTH`), except
    `LA_CMD_GET_SAMPLES` (240 640 bytes in buffer mode, 16 384 bytes in
    stream mode). Transfers that are a multiple of 512 are terminated with a
-   zero-length packet; it is invisible through a tty and harmless via libusb.
+   zero-length packet; it is invisible through a tty and has to be consumed
+   through libusb (§2, item 7).
 3. **Strict request/response.** Never send a command while a reply is still
    in flight. `SYS_*` commands are answered from the USB interrupt handler,
    which spins until the previous transmit completes; issuing one in the
@@ -51,6 +52,14 @@ firmware.
      even while the main loop is busy).
    * `MODULE_LA` / `MODULE_PWM` / `MODULE_PWM_INPUT` — from the main loop,
      which is single-threaded and may be blocked (see §7).
+7. **Through libusb** the same packets run over the bulk endpoints of
+   interface 1, the CDC data interface: claim interface 1, write to bulk OUT
+   `0x01`, read from bulk IN `0x81`, max packet 512 at High Speed. Each
+   64-byte command is one OUT transfer. A reply is read with a buffer one
+   max packet larger than the reply, so that the trailing zero-length packet
+   is a short packet that ends the same transfer, which then completes with
+   exactly the reply length. No control transfer is needed after opening the
+   device — that is what makes this path safe on Windows (§7.3).
 
 ## 3. Packet header
 
@@ -307,9 +316,37 @@ flight and rule §2.3 applies.
   command that arrives before the previous one was consumed overwrites it.
   In practice this bites `CONFIG` followed immediately by `GET_SAMPLES` in
   stream mode: `CONFIG` is lost, `GET_SAMPLES` runs in the previous mode and
-  the firmware ends up stuck as in the first bullet. Wait ≥ 10 ms after
-  `CONFIG` (or until the write has physically drained, e.g. `tcdrain`)
-  before sending the next command.
+  the firmware ends up stuck as in the first bullet. Wait until the write
+  has physically drained (`tcdrain`, `serial_drain`) plus a few ms for the
+  main loop before sending the next command. In stream mode do not wait
+  much longer either: the ring (§5.5) holds 14 packets, `StreamPackReady`
+  is a single flag and near the USB ceiling the host gets one packet per
+  round trip and never catches up, so the first `GET_SAMPLES` has to reach
+  the device within ~13 packet times of `CONFIG` — 18 ms at 12 MHz with
+  8 channels. A 20 ms sleep that the OS stretches to 32 ms (Windows timer
+  granularity) overflowed the ring there every time; the host tools drain
+  and then wait 5 ms on a monotonic clock.
+* **The USB stack stops responding after a few hundred control transfers**
+  (observed on one board, firmware 0.2, Windows 11 host, direct USB 2.0
+  connection). Every request on endpoint 0 after enumeration —
+  `GET_DESCRIPTOR(string)`, CDC `GET_LINE_CODING`/`SET_LINE_CODING`,
+  `SET_CONTROL_LINE_STATE` — carried roughly a 1-in-1000 chance of wedging
+  the device: it answers the next few requests with STALL, goes silent
+  within a millisecond, a port reset ends in "device descriptor request
+  failed" and only a power cycle brings it back. Bulk traffic and plain
+  open/close cycles do not trigger it. The firmware runs ST's USB stack in
+  DMA mode (`usbd_conf.c`: `dma_enable = 1`, 64-word RxFIFO, no EP0 TxFIFO
+  sizing), which is the suspect. It went unnoticed with the vendor
+  application (libusb0 sends no control transfers after enumeration) and
+  on macOS (2–3 requests per open), but `usbser.sys` turns every
+  `GetCommState`/`SetCommState` into about ten, so stock libserialport
+  lasted ~13 open/close cycles per power cycle and pyserial ~17. With the
+  string-descriptor reads and the line-coding round trip taken out of the
+  open path (`scripts/patches/libserialport-0002`, `-0003`) and no default
+  serialcomm in the driver, 500 scans followed by 200 captures ran on one
+  power cycle without a failure. Touch endpoint 0 as little as possible:
+  the firmware ignores line coding, DTR and RTS, so never set them, and do
+  not read descriptors on every open.
 * **Lost DMA requests at high DMA load** (observed on one board, firmware
   0.2; may be specific to that unit). In a buffer capture one DMA stream
   skips a sample and stays shifted; after de-interleaving the data shows a

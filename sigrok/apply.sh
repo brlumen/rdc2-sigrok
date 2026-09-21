@@ -78,7 +78,7 @@ mk_block = (
 insert(os.path.join(target, 'Makefile.am'),
 	'if HW_CHRONOVU_LA\n', mk_block, 'HW_CHIPDIP_RDC2_0064')
 
-cf_line = 'SR_DRIVER([ChipDip RDC2-0064], [%s], [libserialport])\n' % driver
+cf_line = 'SR_DRIVER([ChipDip RDC2-0064], [%s], [libserialport libusb])\n' % driver
 insert(os.path.join(target, 'configure.ac'),
 	'SR_DRIVER([ChronoVu LA], [chronovu-la], [libusb libftdi])\n',
 	cf_line, driver)

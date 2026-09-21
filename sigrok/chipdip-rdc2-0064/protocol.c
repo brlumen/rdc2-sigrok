@@ -32,8 +32,34 @@
 #define RDC2_DRAIN_IDLE_MS		200
 #define RDC2_POLL_INTERVAL_MS		100
 #define RDC2_TIMER_INTERVAL_MS		100
-/* Time for the firmware main loop to consume CONFIG (spec 7.3). */
-#define RDC2_CONFIG_SETTLE_MS		20
+#define RDC2_CANCEL_TIMEOUT_MS		1000
+/*
+ * USB transport. Somebody has to run the libusb event loop for the reply
+ * transfer to ever complete, and that is the driver's own timer source
+ * here, not usb_source_add(): libusb has no file descriptors to poll on
+ * Windows (libusb_get_pollfds() returns NULL since 1.0.24), so
+ * usb_source_add() fails there outright - and that is the one platform this
+ * transport exists for.
+ *
+ * The timer runs on every main loop iteration (interval 0) and each pump
+ * blocks inside libusb for at most RDC2_USB_WAIT_MS, which keeps the loop
+ * off the CPU while it waits. The wait returns the moment the outstanding
+ * transfer completes, so the turnaround is the device's and not the timer's
+ * - and that matters, because the firmware keeps a single request
+ * outstanding (spec 2.3) while a stream packet falls due every 1.4 ms at
+ * 12 MHz on eight channels. A plain 1 ms timeout source cannot do it: GLib
+ * wakes on the OS timer, 15.6 ms on Windows, which is 11 packets late.
+ */
+#define RDC2_USB_TIMER_INTERVAL_MS	0
+#define RDC2_USB_WAIT_MS		1
+/*
+ * Time for the firmware main loop to consume CONFIG after the write has
+ * reached the device (spec 7.3). Deliberately short: the stream ring
+ * overflows when the first GET_SAMPLES arrives more than ~13 packet times
+ * after CONFIG (spec 5.5), 18 ms at 12 MHz x 8 channels, and the firmware
+ * never lets the host catch up afterwards.
+ */
+#define RDC2_CONFIG_SETTLE_MS		5
 
 /* Samples handed to the session bus in one SR_DF_LOGIC packet. */
 #define RDC2_FEED_CHUNK_SAMPLES		16384
@@ -374,33 +400,110 @@ SR_PRIV size_t rdc2_decode_stream_packet(const struct rdc2_capture *cap,
 	return RDC2_STREAM_PACKET_SIZE;
 }
 
-SR_PRIV int rdc2_send_packet(struct sr_serial_dev_inst *serial,
+/*
+ * Wait on the monotonic clock. g_usleep() is only as fine as the OS timer,
+ * which is up to 16 ms on Windows; the waits here are a few ms, once per
+ * capture, so spinning is cheaper than the overshoot.
+ */
+static void rdc2_wait_ms(unsigned int ms)
+{
+	gint64 until;
+
+	until = g_get_monotonic_time() + 1000LL * ms;
+	while (g_get_monotonic_time() < until)
+		g_thread_yield();
+}
+
+/*
+ * Transport (spec 2.7). The device speaks the same protocol through its
+ * CDC-ACM serial port and through the bulk endpoints of the CDC data
+ * interface; the four functions below are the only ones that know the
+ * difference, everything above them works on the sr_dev_inst.
+ */
+
+SR_PRIV int rdc2_send_packet(const struct sr_dev_inst *sdi,
 	const uint8_t *packet)
 {
-	int ret;
+	struct sr_usb_dev_inst *usb;
+	int ret, len;
 
 	/* Spec 2.1: the firmware expects one full 64-byte bulk OUT packet. */
-	ret = serial_write_blocking(serial, packet, RDC2_CMD_SIZE,
-		RDC2_WRITE_TIMEOUT_MS);
-	if (ret < 0)
-		return ret;
-	if (ret != RDC2_CMD_SIZE) {
+	if (sdi->inst_type == SR_INST_SERIAL) {
+		ret = serial_write_blocking(sdi->conn, packet, RDC2_CMD_SIZE,
+			RDC2_WRITE_TIMEOUT_MS);
+		if (ret < 0)
+			return ret;
+		len = ret;
+	} else {
+		usb = sdi->conn;
+		len = 0;
+		ret = libusb_bulk_transfer(usb->devhdl, RDC2_USB_EP_OUT,
+			(unsigned char *)packet, RDC2_CMD_SIZE, &len,
+			RDC2_WRITE_TIMEOUT_MS);
+		if (ret < 0) {
+			sr_err("Command write failed: %s.",
+				libusb_error_name(ret));
+			return SR_ERR_IO;
+		}
+	}
+	if (len != RDC2_CMD_SIZE) {
 		sr_err("Short command write (%d of %d bytes).",
-			ret, RDC2_CMD_SIZE);
+			len, RDC2_CMD_SIZE);
 		return SR_ERR_IO;
 	}
 
 	return SR_OK;
 }
 
-SR_PRIV int rdc2_send_command(struct sr_serial_dev_inst *serial,
+SR_PRIV int rdc2_send_command(const struct sr_dev_inst *sdi,
 	uint8_t module, uint8_t cmd)
 {
 	uint8_t packet[RDC2_CMD_SIZE];
 
 	rdc2_packet_init(packet, module, cmd);
 
-	return rdc2_send_packet(serial, packet);
+	return rdc2_send_packet(sdi, packet);
+}
+
+/*
+ * Read one reply, blocking. Returns the number of bytes read, which is
+ * short of len on timeout, or a negative error code.
+ *
+ * Over USB the buffer has to hold len + RDC2_USB_MAX_PACKET bytes: the
+ * transfer is requested one max packet longer than the reply, so that the
+ * zero-length packet the device appends (spec 2.7) ends the very same
+ * transfer, which then completes with exactly len bytes.
+ */
+static int rdc2_read_blocking(const struct sr_dev_inst *sdi, uint8_t *buf,
+	size_t len, unsigned int timeout_ms)
+{
+	struct sr_usb_dev_inst *usb;
+	int ret, got;
+
+	if (sdi->inst_type == SR_INST_SERIAL)
+		return serial_read_blocking(sdi->conn, buf, len, timeout_ms);
+
+	usb = sdi->conn;
+	got = 0;
+	ret = libusb_bulk_transfer(usb->devhdl, RDC2_USB_EP_IN, buf,
+		(int)(len + RDC2_USB_MAX_PACKET), &got, timeout_ms);
+	if (ret < 0 && ret != LIBUSB_ERROR_TIMEOUT) {
+		sr_err("Reply read failed: %s.", libusb_error_name(ret));
+		return SR_ERR_IO;
+	}
+
+	return got;
+}
+
+/*
+ * Drop whatever the host side still holds. There is nothing to drop on the
+ * USB transport: without a submitted transfer the host never asks the
+ * device for data, so no bytes are buffered anywhere.
+ */
+static void rdc2_flush(const struct sr_dev_inst *sdi)
+{
+	if (sdi->inst_type == SR_INST_SERIAL)
+		serial_flush(sdi->conn);
 }
 
 /*
@@ -408,19 +511,43 @@ SR_PRIV int rdc2_send_command(struct sr_serial_dev_inst *serial,
  * RDC2_DRAIN_IDLE_MS or the total budget ran out. Returns the number of
  * bytes discarded.
  */
-static size_t rdc2_drain(struct sr_serial_dev_inst *serial,
+static size_t rdc2_drain(const struct sr_dev_inst *sdi,
 	unsigned int timeout_ms)
 {
-	uint8_t scrap[RDC2_REPLY_SIZE];
+	struct sr_serial_dev_inst *serial;
+	struct sr_usb_dev_inst *usb;
+	/* A bulk IN shorter than the max packet would overflow (spec 2.7). */
+	uint8_t scrap[RDC2_USB_MAX_PACKET];
 	int64_t deadline, idle_since, now;
 	size_t total, avail;
-	int len;
+	int ret, len;
 
 	total = 0;
 	now = g_get_monotonic_time();
 	deadline = now + 1000LL * timeout_ms;
 	idle_since = now;
 
+	if (sdi->inst_type == SR_INST_USB) {
+		usb = sdi->conn;
+		while (now < deadline) {
+			len = 0;
+			ret = libusb_bulk_transfer(usb->devhdl,
+				RDC2_USB_EP_IN, scrap, sizeof(scrap), &len,
+				RDC2_DRAIN_IDLE_MS);
+			if (ret < 0 && ret != LIBUSB_ERROR_TIMEOUT)
+				break;
+			total += len;
+			/* A read that timed out means the device went quiet. */
+			if (ret == LIBUSB_ERROR_TIMEOUT &&
+					total >= RDC2_REPLY_SIZE)
+				break;
+			now = g_get_monotonic_time();
+		}
+
+		return total;
+	}
+
+	serial = sdi->conn;
 	while (now < deadline) {
 		avail = serial_has_receive_data(serial);
 		if (avail > sizeof(scrap))
@@ -445,47 +572,62 @@ static size_t rdc2_drain(struct sr_serial_dev_inst *serial,
 }
 
 /*
- * Identify the device on an already opened port, following the recommended
- * open sequence of spec 7.3.
+ * Give the firmware time to consume a command that produced no reply, after
+ * the write has physically reached the device (spec 7.3). A completed bulk
+ * OUT transfer already means the device took the packet, so only the serial
+ * transport has anything to drain.
  */
-SR_PRIV int rdc2_probe(struct sr_serial_dev_inst *serial,
+static void rdc2_settle(const struct sr_dev_inst *sdi)
+{
+	if (sdi->inst_type == SR_INST_SERIAL)
+		serial_drain(sdi->conn);
+
+	rdc2_wait_ms(RDC2_CONFIG_SETTLE_MS);
+}
+
+/*
+ * Identify the device on an already opened connection, following the
+ * recommended open sequence of spec 7.3.
+ */
+SR_PRIV int rdc2_probe(const struct sr_dev_inst *sdi,
 	struct rdc2_device_id *id)
 {
-	uint8_t reply[RDC2_REPLY_SIZE];
+	uint8_t reply[RDC2_REPLY_SIZE + RDC2_USB_MAX_PACKET];
 	size_t drained;
 	int ret, len;
 
-	serial_flush(serial);
+	rdc2_flush(sdi);
 
 	/*
 	 * Stop a capture that may still be running from an earlier session.
 	 * An unfinished 16384-byte stream packet can precede the 512-byte
 	 * reply, so everything that arrives is discarded.
 	 */
-	ret = rdc2_send_command(serial, RDC2_MODULE_LA,
+	ret = rdc2_send_command(sdi, RDC2_MODULE_LA,
 		RDC2_LA_CMD_SAMPLE_STOP);
 	if (ret != SR_OK)
 		return ret;
 
-	drained = rdc2_drain(serial, RDC2_DRAIN_TIMEOUT_MS);
+	drained = rdc2_drain(sdi, RDC2_DRAIN_TIMEOUT_MS);
 	if (drained < RDC2_REPLY_SIZE) {
 		sr_dbg("No reply to SAMPLE_STOP on %s (%zu bytes); either this "
 			"is not an RDC2-0064 or its firmware is stuck and the "
-			"device needs to be replugged.", serial->port, drained);
+			"device needs to be replugged.", sdi->connection_id,
+			drained);
 		return SR_ERR;
 	}
-	serial_flush(serial);
+	rdc2_flush(sdi);
 
-	ret = rdc2_send_command(serial, RDC2_MODULE_SYSTEM,
+	ret = rdc2_send_command(sdi, RDC2_MODULE_SYSTEM,
 		RDC2_SYS_CMD_GET_ID);
 	if (ret != SR_OK)
 		return ret;
 
-	len = serial_read_blocking(serial, reply, sizeof(reply),
+	len = rdc2_read_blocking(sdi, reply, RDC2_REPLY_SIZE,
 		RDC2_ID_TIMEOUT_MS);
 	if (len != RDC2_REPLY_SIZE) {
 		sr_dbg("Got %d of %d ID reply bytes from %s.",
-			len, RDC2_REPLY_SIZE, serial->port);
+			len, RDC2_REPLY_SIZE, sdi->connection_id);
 		return SR_ERR;
 	}
 
@@ -766,6 +908,125 @@ SR_PRIV int rdc2_setup_capture(const struct sr_dev_inst *sdi)
 	return SR_OK;
 }
 
+static void LIBUSB_CALL rdc2_usb_transfer_cb(struct libusb_transfer *xfer);
+
+static libusb_context *rdc2_usb_ctx(const struct sr_dev_inst *sdi)
+{
+	struct drv_context *drvc;
+
+	drvc = sdi->driver->context;
+
+	return drvc->sr_ctx->libusb_ctx;
+}
+
+/*
+ * Let libusb complete the outstanding transfer. The wait returns as soon as
+ * the transfer is done, so RDC2_USB_WAIT_MS only bounds how long the
+ * session's main loop is held up while the device has nothing to say.
+ */
+static void rdc2_usb_pump(const struct sr_dev_inst *sdi)
+{
+	struct timeval tv;
+
+	tv.tv_sec = 0;
+	tv.tv_usec = 1000 * RDC2_USB_WAIT_MS;
+	libusb_handle_events_timeout(rdc2_usb_ctx(sdi), &tv);
+}
+
+/*
+ * Cancel the outstanding transfer and wait for its callback to run. Neither
+ * the transfer nor the device handle may go away while libusb still owns
+ * the transfer.
+ */
+static void rdc2_usb_cancel(const struct sr_dev_inst *sdi)
+{
+	struct dev_context *devc;
+	int64_t deadline;
+
+	devc = sdi->priv;
+	if (!devc->xfer_active)
+		return;
+
+	libusb_cancel_transfer(devc->xfer);
+	deadline = g_get_monotonic_time() + 1000LL * RDC2_CANCEL_TIMEOUT_MS;
+	while (devc->xfer_active && g_get_monotonic_time() < deadline)
+		rdc2_usb_pump(sdi);
+
+	/* Whatever the callback recorded is a cancellation, not a reply. */
+	devc->xfer_done = FALSE;
+}
+
+/*
+ * Let the outstanding transfer run to its end, for at most timeout_ms, and
+ * drop whatever it collected. This is the USB counterpart of reading a
+ * pending serial reply to its end: cancelling instead would leave the reply
+ * and its zero-length packet in the pipe, where the next read would take
+ * them for the reply it actually waits for.
+ */
+static void rdc2_usb_wait(const struct sr_dev_inst *sdi,
+	unsigned int timeout_ms)
+{
+	struct dev_context *devc;
+	int64_t deadline;
+
+	devc = sdi->priv;
+	deadline = g_get_monotonic_time() + 1000LL * timeout_ms;
+	while (devc->xfer_active && g_get_monotonic_time() < deadline)
+		rdc2_usb_pump(sdi);
+	if (devc->xfer_active)
+		sr_dbg("Pending reply was not completed.");
+	rdc2_usb_cancel(sdi);
+	devc->xfer_done = FALSE;
+}
+
+/* Free the reply transfer, but only once its callback has run. */
+static void rdc2_usb_free_transfer(const struct sr_dev_inst *sdi)
+{
+	struct dev_context *devc;
+
+	devc = sdi->priv;
+	if (!devc->xfer)
+		return;
+
+	rdc2_usb_cancel(sdi);
+	if (devc->xfer_active) {
+		sr_warn("A USB transfer did not complete after cancellation; "
+			"leaking it, the device may need to be replugged.");
+	} else {
+		libusb_free_transfer(devc->xfer);
+	}
+	devc->xfer = NULL;
+}
+
+/*
+ * Hand the outstanding reply to libusb. The transfer asks for one max
+ * packet more than the reply holds, so that the trailing zero-length packet
+ * (spec 2.7) completes it with exactly rx_want bytes. A timeout of 0 means
+ * no timeout, as with the serial watchdog.
+ */
+static int rdc2_usb_submit(const struct sr_dev_inst *sdi,
+	unsigned int timeout_ms)
+{
+	struct dev_context *devc;
+	struct sr_usb_dev_inst *usb;
+	int ret;
+
+	devc = sdi->priv;
+	usb = sdi->conn;
+
+	libusb_fill_bulk_transfer(devc->xfer, usb->devhdl, RDC2_USB_EP_IN,
+		devc->rx_buf, (int)(devc->rx_want + RDC2_USB_MAX_PACKET),
+		rdc2_usb_transfer_cb, (struct sr_dev_inst *)sdi, timeout_ms);
+	if ((ret = libusb_submit_transfer(devc->xfer)) < 0) {
+		sr_err("Failed to submit the USB transfer: %s.",
+			libusb_error_name(ret));
+		return SR_ERR_IO;
+	}
+	devc->xfer_active = TRUE;
+
+	return SR_OK;
+}
+
 /* Remove the event sources and end the session's datafeed exactly once. */
 static void rdc2_finish(const struct sr_dev_inst *sdi)
 {
@@ -778,21 +1039,30 @@ static void rdc2_finish(const struct sr_dev_inst *sdi)
 	devc->state = RDC2_STATE_DONE;
 	devc->rx_want = 0;
 	if (devc->sources_added) {
-		serial_source_remove(sdi->session, sdi->conn);
+		if (sdi->inst_type == SR_INST_SERIAL)
+			serial_source_remove(sdi->session, sdi->conn);
 		sr_session_source_remove(sdi->session, -1);
 		devc->sources_added = FALSE;
 	}
+	if (sdi->inst_type == SR_INST_USB)
+		rdc2_usb_free_transfer(sdi);
 
 	std_session_send_df_end(sdi);
 }
 
 /*
  * Send one command and arm the receive path for its reply. Never call this
- * while another reply is still outstanding (spec 2.3). A rx_deadline of 0
- * disables the watchdog; it is re-armed as soon as the first byte arrives.
+ * while another reply is still outstanding (spec 2.3).
+ *
+ * With unbounded set the reply may take arbitrarily long: an armed trigger
+ * delays the very first stream packet for as long as it takes (spec 7.3,
+ * GET_SAMPLES blocks in the device until a packet is ready). The serial
+ * watchdog is then disarmed until the first byte arrives - a rx_deadline of
+ * 0 disables it - and the USB transfer is submitted without a timeout.
  */
 static int rdc2_request(const struct sr_dev_inst *sdi, uint8_t module,
-	uint8_t cmd, size_t reply_size, unsigned int timeout_ms)
+	uint8_t cmd, size_t reply_size, unsigned int timeout_ms,
+	gboolean unbounded)
 {
 	struct dev_context *devc;
 	int ret;
@@ -801,12 +1071,21 @@ static int rdc2_request(const struct sr_dev_inst *sdi, uint8_t module,
 	devc->rx_len = 0;
 	devc->rx_want = reply_size;
 	devc->rx_timeout_ms = timeout_ms;
-	devc->rx_deadline = g_get_monotonic_time() + 1000LL * timeout_ms;
+	devc->rx_deadline = unbounded ? 0 :
+		g_get_monotonic_time() + 1000LL * timeout_ms;
 
-	ret = rdc2_send_command(sdi->conn, module, cmd);
+	ret = rdc2_send_command(sdi, module, cmd);
 	if (ret != SR_OK) {
 		devc->rx_want = 0;
 		return ret;
+	}
+
+	if (sdi->inst_type == SR_INST_USB) {
+		ret = rdc2_usb_submit(sdi, unbounded ? 0 : timeout_ms);
+		if (ret != SR_OK) {
+			devc->rx_want = 0;
+			return ret;
+		}
 	}
 
 	return SR_OK;
@@ -872,7 +1151,7 @@ static void rdc2_handle_buffer_status(const struct sr_dev_inst *sdi)
 	}
 
 	if (rdc2_request(sdi, RDC2_MODULE_LA, RDC2_LA_CMD_GET_SAMPLES,
-			RDC2_BUFFER_REPLY_SIZE, RDC2_BUFFER_TIMEOUT_MS)
+			RDC2_BUFFER_REPLY_SIZE, RDC2_BUFFER_TIMEOUT_MS, FALSE)
 			!= SR_OK) {
 		sr_err("Failed to request the sample buffer.");
 		rdc2_finish(sdi);
@@ -930,7 +1209,7 @@ static void rdc2_handle_stream_packet(const struct sr_dev_inst *sdi)
 
 	if (done) {
 		if (rdc2_request(sdi, RDC2_MODULE_LA, RDC2_LA_CMD_SAMPLE_STOP,
-				RDC2_REPLY_SIZE, RDC2_STOP_TIMEOUT_MS)
+				RDC2_REPLY_SIZE, RDC2_STOP_TIMEOUT_MS, FALSE)
 				!= SR_OK) {
 			sr_err("Failed to stop the stream capture.");
 			rdc2_finish(sdi);
@@ -942,24 +1221,10 @@ static void rdc2_handle_stream_packet(const struct sr_dev_inst *sdi)
 
 	if (rdc2_request(sdi, RDC2_MODULE_LA, RDC2_LA_CMD_GET_SAMPLES,
 			RDC2_STREAM_PACKET_SIZE,
-			rdc2_stream_timeout_ms(&devc->cap)) != SR_OK) {
+			rdc2_stream_timeout_ms(&devc->cap), FALSE) != SR_OK) {
 		sr_err("Failed to request the next stream packet.");
 		rdc2_finish(sdi);
 	}
-}
-
-/*
- * An armed trigger delays the very first stream packet for an unbounded
- * amount of time (spec 7.3: GET_SAMPLES blocks in the device until a packet
- * is ready), so the watchdog only starts once the device begins to answer.
- */
-static void rdc2_arm_first_stream_packet(const struct sr_dev_inst *sdi)
-{
-	struct dev_context *devc;
-
-	devc = sdi->priv;
-	if (devc->send_trigger)
-		devc->rx_deadline = 0;
 }
 
 static void rdc2_handle_stop_reply(const struct sr_dev_inst *sdi)
@@ -1004,6 +1269,58 @@ static void rdc2_handle_reply(const struct sr_dev_inst *sdi)
 		sr_warn("Unexpected reply in state %d.", devc->state);
 		break;
 	}
+}
+
+/*
+ * The transfer left libusb's hands. Only record what happened: libusb must
+ * not be re-entered from a transfer callback, and everything the reply
+ * leads to - the next command, cancelling, freeing the transfer - calls
+ * into libusb again. rdc2_timer_tick() picks the result up right after the
+ * pump that ran this callback.
+ */
+static void LIBUSB_CALL rdc2_usb_transfer_cb(struct libusb_transfer *xfer)
+{
+	struct sr_dev_inst *sdi;
+	struct dev_context *devc;
+
+	sdi = xfer->user_data;
+	devc = sdi->priv;
+
+	devc->xfer_status = xfer->status;
+	devc->xfer_length = xfer->actual_length;
+	devc->xfer_active = FALSE;
+	devc->xfer_done = TRUE;
+}
+
+/* Act on the transfer the callback above completed. */
+static void rdc2_usb_complete(const struct sr_dev_inst *sdi)
+{
+	struct dev_context *devc;
+
+	devc = sdi->priv;
+	devc->xfer_done = FALSE;
+
+	if (devc->state == RDC2_STATE_DONE)
+		return;
+
+	if (devc->xfer_status != LIBUSB_TRANSFER_COMPLETED) {
+		/* Same diagnosis as the serial watchdog. */
+		sr_err("Timeout after %u ms, got %d of %zu reply bytes.",
+			devc->rx_timeout_ms, devc->xfer_length, devc->rx_want);
+		rdc2_finish(sdi);
+		return;
+	}
+	if ((size_t)devc->xfer_length != devc->rx_want) {
+		sr_err("Short reply (%d of %zu bytes).", devc->xfer_length,
+			devc->rx_want);
+		rdc2_finish(sdi);
+		return;
+	}
+
+	/* The reply is complete, no request is outstanding any more. */
+	devc->rx_len = devc->rx_want;
+	devc->rx_want = 0;
+	rdc2_handle_reply(sdi);
 }
 
 SR_PRIV int rdc2_receive_data(int fd, int revents, void *cb_data)
@@ -1066,6 +1383,19 @@ SR_PRIV int rdc2_timer_tick(int fd, int revents, void *cb_data)
 
 	if (!(sdi = cb_data) || !(devc = sdi->priv))
 		return TRUE;
+
+	/*
+	 * On USB this source is the whole event loop of the acquisition: it
+	 * pumps libusb, which completes the reply transfer, and acts on the
+	 * result the transfer callback left behind. That can finish the
+	 * acquisition, so the state is re-read afterwards.
+	 */
+	if (sdi->inst_type == SR_INST_USB) {
+		rdc2_usb_pump(sdi);
+		if (devc->xfer_done)
+			rdc2_usb_complete(sdi);
+	}
+
 	if (devc->state == RDC2_STATE_IDLE || devc->state == RDC2_STATE_DONE)
 		return TRUE;
 
@@ -1077,7 +1407,7 @@ SR_PRIV int rdc2_timer_tick(int fd, int revents, void *cb_data)
 		/* Only poll while no reply is in flight (spec 2.3). */
 		if (rdc2_request(sdi, RDC2_MODULE_SYSTEM,
 				RDC2_SYS_CMD_GET_STATUS, RDC2_REPLY_SIZE,
-				RDC2_STATUS_TIMEOUT_MS) != SR_OK) {
+				RDC2_STATUS_TIMEOUT_MS, FALSE) != SR_OK) {
 			sr_err("Failed to request the device status.");
 			rdc2_finish(sdi);
 			return TRUE;
@@ -1086,7 +1416,12 @@ SR_PRIV int rdc2_timer_tick(int fd, int revents, void *cb_data)
 		return TRUE;
 	}
 
-	/* Watchdog: a reply is outstanding but nothing arrives any more. */
+	/*
+	 * Watchdog: a reply is outstanding but nothing arrives any more. Only
+	 * the serial transport needs it, libusb times its own transfer out.
+	 */
+	if (sdi->inst_type == SR_INST_USB)
+		return TRUE;
 	if (devc->rx_want && devc->rx_deadline && now > devc->rx_deadline) {
 		sr_err("Timeout after %u ms, got %zu of %zu reply bytes.",
 			devc->rx_timeout_ms, devc->rx_len, devc->rx_want);
@@ -1099,13 +1434,12 @@ SR_PRIV int rdc2_timer_tick(int fd, int revents, void *cb_data)
 SR_PRIV int rdc2_start_acquisition(const struct sr_dev_inst *sdi)
 {
 	struct dev_context *devc;
-	struct sr_serial_dev_inst *serial;
 	uint8_t packet[RDC2_CMD_SIZE];
 	size_t rx_alloc, feed_alloc;
+	unsigned int interval_ms;
 	int ret;
 
 	devc = sdi->priv;
-	serial = sdi->conn;
 
 	if (devc->cap.mode == RDC2_MODE_BUFFER) {
 		rx_alloc = RDC2_BUFFER_REPLY_SIZE;
@@ -1116,6 +1450,8 @@ SR_PRIV int rdc2_start_acquisition(const struct sr_dev_inst *sdi)
 	}
 	if (rx_alloc < RDC2_REPLY_SIZE)
 		rx_alloc = RDC2_REPLY_SIZE;
+	/* Room for the zero-length packet a USB read swallows (spec 2.7). */
+	rx_alloc += RDC2_USB_MAX_PACKET;
 
 	if (devc->rx_alloc < rx_alloc) {
 		devc->rx_buf = g_realloc(devc->rx_buf, rx_alloc);
@@ -1135,26 +1471,41 @@ SR_PRIV int rdc2_start_acquisition(const struct sr_dev_inst *sdi)
 	devc->send_trigger = devc->cap.triggers_active ||
 		devc->cap.edge_trigger != RDC2_TRIG_NONE;
 
+	if (sdi->inst_type == SR_INST_USB) {
+		if (!(devc->xfer = libusb_alloc_transfer(0))) {
+			sr_err("Cannot allocate the USB transfer.");
+			return SR_ERR_MALLOC;
+		}
+		devc->xfer_active = FALSE;
+	}
+
 	/* Drop leftovers of an earlier session so start/stop cycles work. */
-	serial_flush(serial);
+	rdc2_flush(sdi);
 
 	/* LA_CMD_CONFIG has no reply and starts (or arms) the capture. */
 	rdc2_build_config_packet(&devc->cap, packet);
-	if ((ret = rdc2_send_packet(serial, packet)) != SR_OK) {
+	if ((ret = rdc2_send_packet(sdi, packet)) != SR_OK) {
 		sr_err("Failed to configure the device.");
+		rdc2_usb_free_transfer(sdi);
 		return ret;
 	}
 
 	std_session_send_df_header(sdi);
 
-	ret = serial_source_add(sdi->session, serial, G_IO_IN, -1,
-		rdc2_receive_data, (struct sr_dev_inst *)sdi);
-	if (ret != SR_OK)
-		return ret;
-	ret = sr_session_source_add(sdi->session, -1, 0, RDC2_TIMER_INTERVAL_MS,
+	if (sdi->inst_type == SR_INST_SERIAL) {
+		ret = serial_source_add(sdi->session, sdi->conn, G_IO_IN, -1,
+			rdc2_receive_data, (struct sr_dev_inst *)sdi);
+		if (ret != SR_OK)
+			return ret;
+	}
+	interval_ms = (sdi->inst_type == SR_INST_USB)
+		? RDC2_USB_TIMER_INTERVAL_MS : RDC2_TIMER_INTERVAL_MS;
+	ret = sr_session_source_add(sdi->session, -1, 0, interval_ms,
 		rdc2_timer_tick, (struct sr_dev_inst *)sdi);
 	if (ret != SR_OK) {
-		serial_source_remove(sdi->session, serial);
+		if (sdi->inst_type == SR_INST_SERIAL)
+			serial_source_remove(sdi->session, sdi->conn);
+		rdc2_usb_free_transfer(sdi);
 		return ret;
 	}
 	devc->sources_added = TRUE;
@@ -1171,16 +1522,17 @@ SR_PRIV int rdc2_start_acquisition(const struct sr_dev_inst *sdi)
 	 * running, the capture above has just been started by CONFIG. The
 	 * firmware keeps a single command slot, so a GET_SAMPLES that lands
 	 * before the main loop picked up CONFIG overwrites it and hangs the
-	 * device (spec 7.3). Give the main loop time to consume CONFIG.
+	 * device (spec 7.3). Wait until the write has physically reached the
+	 * device, then give the main loop time to consume it.
 	 */
-	g_usleep(1000 * RDC2_CONFIG_SETTLE_MS);
+	rdc2_settle(sdi);
 	ret = rdc2_request(sdi, RDC2_MODULE_LA, RDC2_LA_CMD_GET_SAMPLES,
-		RDC2_STREAM_PACKET_SIZE, rdc2_stream_timeout_ms(&devc->cap));
+		RDC2_STREAM_PACKET_SIZE, rdc2_stream_timeout_ms(&devc->cap),
+		devc->send_trigger);
 	if (ret != SR_OK) {
 		rdc2_finish(sdi);
 		return ret;
 	}
-	rdc2_arm_first_stream_packet(sdi);
 	devc->state = RDC2_STATE_STREAM_PACKET;
 
 	return SR_OK;
@@ -1189,13 +1541,12 @@ SR_PRIV int rdc2_start_acquisition(const struct sr_dev_inst *sdi)
 SR_PRIV int rdc2_stop_acquisition(const struct sr_dev_inst *sdi)
 {
 	struct dev_context *devc;
-	struct sr_serial_dev_inst *serial;
 	uint8_t overflow;
 	uint32_t packets;
+	size_t rest;
 	int len;
 
 	devc = sdi->priv;
-	serial = sdi->conn;
 
 	if (devc->state == RDC2_STATE_IDLE || devc->state == RDC2_STATE_DONE) {
 		rdc2_finish(sdi);
@@ -1234,17 +1585,24 @@ SR_PRIV int rdc2_stop_acquisition(const struct sr_dev_inst *sdi)
 	 * replugged. Edge triggers do not have this problem.
 	 */
 	if (devc->rx_want) {
-		len = serial_read_blocking(serial, devc->rx_buf + devc->rx_len,
-			devc->rx_want - devc->rx_len, RDC2_STATUS_TIMEOUT_MS);
-		if (len < 0 || (size_t)len < devc->rx_want - devc->rx_len)
-			sr_dbg("Pending status reply was not completed.");
+		if (sdi->inst_type == SR_INST_USB) {
+			rdc2_usb_wait(sdi, RDC2_STATUS_TIMEOUT_MS);
+		} else {
+			rest = devc->rx_want - devc->rx_len;
+			len = rdc2_read_blocking(sdi,
+				devc->rx_buf + devc->rx_len, rest,
+				RDC2_STATUS_TIMEOUT_MS);
+			if (len < 0 || (size_t)len < rest)
+				sr_dbg("Pending status reply was not "
+					"completed.");
+		}
 		devc->rx_want = 0;
 		devc->rx_len = 0;
 	}
 
-	if (rdc2_send_command(serial, RDC2_MODULE_LA, RDC2_LA_CMD_SAMPLE_STOP)
+	if (rdc2_send_command(sdi, RDC2_MODULE_LA, RDC2_LA_CMD_SAMPLE_STOP)
 			== SR_OK) {
-		len = serial_read_blocking(serial, devc->rx_buf,
+		len = rdc2_read_blocking(sdi, devc->rx_buf,
 			RDC2_REPLY_SIZE, RDC2_STOP_TIMEOUT_MS);
 		if (len == RDC2_REPLY_SIZE) {
 			rdc2_parse_stop(devc->rx_buf, &overflow, &packets);
