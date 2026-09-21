@@ -1,0 +1,6 @@
+# Check every text file out with LF on all platforms: the build scripts,
+# versions.env and the git patches are consumed by POSIX tools (MSYS2 bash,
+# git apply) even on Windows, and CRLF would break them there.
+* text=auto eol=lf
+*.zip binary
+*.inf text eol=crlf
