@@ -15,7 +15,7 @@ generated. Needs loopback jumpers:
 Run it from the repository with the rdc2la virtualenv:
 
     python/.venv/bin/python scripts/hw-selftest.py [--edge] [--meter]
-        [--sigrok | --no-sigrok] [--stream-rate 12M] [--port /dev/cu...]
+        [--sigrok | --no-sigrok] [--stream-rate 12M] [--port /dev/cu...|usb]
 
 sigrok-cli is exercised when it is on PATH or in $OPENLA_PREFIX/bin.
 Exit status is 0 when every check passed.
@@ -332,8 +332,17 @@ def read_sr(path: str) -> tuple[bytes, int, float]:
     return data, unitsize, rate
 
 
+def sigrok_conn(port: str) -> str:
+    """rdc2la port name as the driver's conn= option.
+
+    Serial ports are passed as they are; the libusb selector ``usb:<bus>.<address>``
+    becomes the ``<bus>.<address>`` form that sr_usb_find() expects.
+    """
+    return port[4:] if port.lower().startswith("usb:") else port
+
+
 def test_sigrok(rep: Report, cli: str, port: str, d1_wired: bool) -> None:
-    dev_arg = f"chipdip-rdc2-0064:conn={port}"
+    dev_arg = f"chipdip-rdc2-0064:conn={sigrok_conn(port)}"
     tmp = tempfile.mkdtemp(prefix="hw-selftest-")
     cases = [
         ("sigrok buffer 100k 10k", ["-c", "samplerate=100k", "--channels", CH8, "--samples", "10000"], None),
@@ -365,7 +374,7 @@ def test_sigrok(rep: Report, cli: str, port: str, d1_wired: bool) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("-p", "--port", help="serial port; autodetected when omitted")
+    ap.add_argument("-p", "--port", help="serial port or usb[:bus.address]; autodetected when omitted")
     ap.add_argument("--edge", action="store_true", help="M16 is wired to EDGE instead of D1")
     ap.add_argument("--meter", action="store_true", help="M17 is wired to M20: test the frequency meter")
     ap.add_argument("--stream-rate", default="12M", help="fast stream rate to test (default 12M; vendor limit 18M)")
