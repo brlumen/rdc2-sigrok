@@ -1,0 +1,77 @@
+From b22389052a0c9002b905bae9cb95cfa157e3d0a4 Mon Sep 17 00:00:00 2001
+From: BrLumen <igflocal@gmail.com>
+Date: Sat, 19 Sep 2026 09:26:14 +0700
+Subject: [PATCH] CMakeLists.txt: Do not force static Qt plugins and pkg-config
+ libs on win32
+
+STATIC_PKGDEPS_LIBS is documented as user configurable, but on WIN32 a
+plain set() after the option() overrides whatever the user passed with
+-DSTATIC_PKGDEPS_LIBS=..., so it cannot be turned off.  Compute the
+default from WIN32 instead and hand it to option(), which keeps the
+static default for MXE builds and lets an MSYS2 build (shared
+libsigrok, shared glib, ...) link dynamically.
+
+The static Qt plugin block (QT_STATICPLUGIN, Qt::QSvgPlugin,
+Qt::QWindowsIntegrationPlugin) is likewise only valid for a static Qt:
+with a shared Qt the plugin targets are MODULE libraries that CMake
+refuses to link into an executable, and the plugins are loaded at run
+time anyway.  Decide by the type of the Qt::Core target rather than by
+platform.  main.cpp already guards its Q_IMPORT_PLUGIN() calls with
+QT_STATIC, so the two stay consistent.
+
+Signed-off-by: BrLumen <igflocal@gmail.com>
+---
+ CMakeLists.txt | 22 ++++++++++++++++++----
+ 1 file changed, 18 insertions(+), 4 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index e0520e0f..223ab469 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -47,14 +47,18 @@ option(ENABLE_STACKTRACE "Enable stack trace when crashing" FALSE)
+ option(ENABLE_DECODE "Build with libsigrokdecode" TRUE)
+ option(ENABLE_FLOW "Build with libsigrokflow" FALSE)
+ option(ENABLE_TESTS "Enable unit tests" FALSE)
+-option(STATIC_PKGDEPS_LIBS "Statically link to (pkg-config) libraries" FALSE)
+ option(ENABLE_TS_UPDATE "Update .ts source files (Qt l10n)" FALSE)
+ 
++# On Windows/MinGW we need to statically link to libraries.
++# This option is user configurable, but enable it by default on win32.
+ if(WIN32)
+-	# On Windows/MinGW we need to statically link to libraries.
+-	# This option is user configurable, but enable it by default on win32.
+-	set(STATIC_PKGDEPS_LIBS TRUE)
++	set(STATIC_PKGDEPS_LIBS_DEFAULT TRUE)
++else()
++	set(STATIC_PKGDEPS_LIBS_DEFAULT FALSE)
++endif()
++option(STATIC_PKGDEPS_LIBS "Statically link to (pkg-config) libraries" ${STATIC_PKGDEPS_LIBS_DEFAULT})
+ 
++if(WIN32)
+ 	# Windows does not support UNIX signals.
+ 	set(ENABLE_SIGNALS FALSE)
+ endif()
+@@ -632,10 +636,20 @@ else()
+ endif()
+ 
+ if(WIN32)
++	if(Qt5_FOUND)
++		get_target_property(QT_CORE_LIBRARY_TYPE Qt5::Core TYPE)
++	else()
++		get_target_property(QT_CORE_LIBRARY_TYPE Qt6::Core TYPE)
++	endif()
++endif()
++
++if(WIN32 AND QT_CORE_LIBRARY_TYPE STREQUAL "STATIC_LIBRARY")
+ 	# On Windows we need to statically link the libqsvg imageformat
+ 	# plugin (and the QtSvg component) for SVG graphics/icons to work.
+ 	# We also need QWindowsIntegrationPlugin, Qt5PlatformSupport (only for
+ 	# Qt < 5.8.0), and all Qt libs and their dependencies.
++	# This only applies to a static Qt (MXE); a shared Qt (e.g. MSYS2)
++	# loads its plugins at run time and has no plugin targets to link.
+ 	add_definitions(-DQT_STATICPLUGIN)
+ 	if(Qt5_FOUND)
+ 		list(APPEND PULSEVIEW_LINK_LIBS Qt5::QSvgPlugin)
+-- 
+2.45.1.windows.1
+

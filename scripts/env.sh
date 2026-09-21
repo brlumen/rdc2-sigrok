@@ -1,15 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 BrLumen
 #
-# Sourceable environment for the sigrok stack built by scripts/build-macos.sh.
+# Sourceable environment for the sigrok stack built by scripts/build-macos.sh
+# or, in an MSYS2 UCRT64 shell, scripts/build-msys2.sh.
 #
 #   . scripts/env.sh                     # default prefix ~/.local/openla
 #   OPENLA_PREFIX=/opt/openla . scripts/env.sh    # matches --prefix /opt/openla
 #
-# Puts $OPENLA_PREFIX/bin ahead of Homebrew on PATH, so that "sigrok-cli" and
-# "pulseview" are the ones built here and not the Homebrew bottles.
-# PKG_CONFIG_PATH is set as well so that anything you compile against this
-# stack picks up our libsigrok*.pc rather than Homebrew's libsigrok 0.5.2.
+# Puts $OPENLA_PREFIX/bin ahead of Homebrew (or /ucrt64) on PATH, so that
+# "sigrok-cli" and "pulseview" are the ones built here and not the packaged
+# ones.  PKG_CONFIG_PATH is set as well so that anything you compile against
+# this stack picks up our libsigrok*.pc rather than a packaged libsigrok.
 #
 # Not executable on purpose: source it, do not run it.
 
@@ -41,5 +42,21 @@ esac
 # $OPENLA_PREFIX/share is reached through the compiled-in paths instead.
 # build-macos.sh uses the same value. Drop this block if you need Homebrew's
 # GLib data dir in the same shell.
-XDG_DATA_DIRS="/usr/local/share:/usr/share"
-export XDG_DATA_DIRS
+#
+# MSYS2 has the opposite problem: its profile exports XDG_DATA_DIRS for
+# bash-completion, and as soon as that variable exists GLib on Windows stops
+# deriving the data dirs from the DLL location ($OPENLA_PREFIX/share, where
+# our decoders are).  Put the prefix in front instead of replacing the list,
+# so that completion keeps working.  Outside an MSYS2 shell the variable is
+# unset and the DLL-derived path is found without help.
+case "$(uname -s)" in
+Darwin)
+	XDG_DATA_DIRS="/usr/local/share:/usr/share"
+	export XDG_DATA_DIRS ;;
+MSYS*|MINGW*)
+	case ":${XDG_DATA_DIRS-}:" in
+		*":${OPENLA_PREFIX}/share:"*) ;;
+		*) XDG_DATA_DIRS="${OPENLA_PREFIX}/share${XDG_DATA_DIRS:+:${XDG_DATA_DIRS}}"
+		   export XDG_DATA_DIRS ;;
+	esac ;;
+esac

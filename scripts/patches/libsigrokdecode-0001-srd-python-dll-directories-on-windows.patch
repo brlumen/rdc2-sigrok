@@ -1,0 +1,122 @@
+From 62734a541ece43b46975512add5daa8e548af6ca Mon Sep 17 00:00:00 2001
+From: BrLumen <igflocal@gmail.com>
+Date: Sat, 19 Sep 2026 10:08:48 +0700
+Subject: [PATCH] srd: Let embedded Python find its extension module DLLs on
+ Windows
+
+Since Python 3.8 an extension module on Windows resolves its DLL
+dependencies from the directory of the executable, the system
+directories and the directories registered with os.add_dll_directory();
+PATH is no longer searched.  python.exe ships the DLLs its extension
+modules need next to itself, but a program that embeds libpython
+(sigrok-cli, PulseView) lives somewhere else, so any extension module
+with a dependency of its own fails to import with "DLL load failed
+while importing ...".  In an MSYS2 build the first victim is _ctypes
+(needs libffi), which makes the ir_irmp decoder fail to load on every
+start.
+
+Register the interpreter's own DLL directories right after
+Py_InitializeEx(): bin/ below sys.base_prefix for MSYS2 and other
+Unix-like layouts, the prefix itself and DLLs/ for python.org builds.
+Only stable-ABI calls are used, as the rest of the library.  The handles
+are kept alive in sys so the registration lasts as long as the
+interpreter does; on Python < 3.8 os.add_dll_directory() does not exist
+and nothing is done.
+
+Signed-off-by: BrLumen <igflocal@gmail.com>
+---
+ srd.c | 71 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 71 insertions(+)
+
+diff --git a/srd.c b/srd.c
+index 10dfaf6..e7ef74c 100644
+--- a/srd.c
++++ b/srd.c
+@@ -189,6 +189,73 @@ err:
+ 	return SRD_ERR_PYTHON;
+ }
+ 
++#ifdef _WIN32
++/*
++ * Since Python 3.8 an extension module on Windows resolves its DLL
++ * dependencies from the directory of the executable, the system directories
++ * and the directories registered with os.add_dll_directory() -- PATH is not
++ * searched.  python.exe has the DLLs its extension modules need next to
++ * itself; a program that embeds libpython usually does not, so e.g. the
++ * ctypes module (and with it the ir_irmp decoder) fails to import with
++ * "DLL load failed".  Register the interpreter's own DLL directories: bin/
++ * for MSYS2 and other Unix-like layouts, the prefix itself and DLLs/ for
++ * python.org builds.  The handles are kept in sys so the registration lasts
++ * for the lifetime of the interpreter.  Must be called with the GIL held.
++ */
++static void srd_add_python_dll_directories(void)
++{
++	static const char *const subdirs[] = { "", "bin", "DLLs" };
++	PyObject *py_os, *py_add, *py_prefix, *py_bytes, *py_list, *py_handle;
++	const char *prefix;
++	char *dir;
++	size_t i;
++
++	py_os = PyImport_ImportModule("os");
++	if (!py_os) {
++		PyErr_Clear();
++		return;
++	}
++	py_add = PyObject_GetAttrString(py_os, "add_dll_directory");
++	Py_DECREF(py_os);
++	if (!py_add) {
++		/* Python < 3.8: PATH is still searched, nothing to do. */
++		PyErr_Clear();
++		return;
++	}
++
++	py_prefix = PySys_GetObject("base_prefix"); /* Borrowed. */
++	py_bytes = py_prefix ? PyUnicode_AsUTF8String(py_prefix) : NULL;
++	if (!py_bytes) {
++		PyErr_Clear();
++		Py_DECREF(py_add);
++		return;
++	}
++	prefix = PyBytes_AsString(py_bytes);
++
++	py_list = PyList_New(0);
++	for (i = 0; i < G_N_ELEMENTS(subdirs); i++) {
++		dir = subdirs[i][0] ? g_build_filename(prefix, subdirs[i], NULL)
++				    : g_strdup(prefix);
++		if (g_file_test(dir, G_FILE_TEST_IS_DIR)) {
++			py_handle = PyObject_CallFunction(py_add, "s", dir);
++			if (py_handle) {
++				srd_dbg("Python DLL directory: %s", dir);
++				PyList_Append(py_list, py_handle);
++				Py_DECREF(py_handle);
++			} else {
++				srd_warn("os.add_dll_directory(%s) failed.", dir);
++				PyErr_Clear();
++			}
++		}
++		g_free(dir);
++	}
++	PySys_SetObject("_srd_dll_directories", py_list);
++	Py_DECREF(py_list);
++	Py_DECREF(py_bytes);
++	Py_DECREF(py_add);
++}
++#endif
++
+ /**
+  * Initialize libsigrokdecode.
+  *
+@@ -238,6 +305,10 @@ SRD_API int srd_init(const char *path)
+ 	/* Initialize the Python interpreter. */
+ 	Py_InitializeEx(0);
+ 
++#ifdef _WIN32
++	srd_add_python_dll_directories();
++#endif
++
+ 	/* Locations relative to the XDG system data directories. */
+ 	sys_datadirs = g_get_system_data_dirs();
+ 	for (i = g_strv_length((char **)sys_datadirs); i > 0; i--) {
+-- 
+2.45.1.windows.1
+
