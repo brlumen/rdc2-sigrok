@@ -1,0 +1,60 @@
+; SPDX-License-Identifier: Apache-2.0
+; Copyright (c) 2026 BrLumen
+;
+; rdc2-0064-usbser.inf -- bind Windows' in-box usbser.sys to the ChipDip
+; RDC2-0064 logic analyzer as a whole.
+;
+; The board is a plain CDC-ACM device, but its device descriptor says
+; bDeviceClass = 0 and its configuration carries no Interface Association
+; Descriptor.  Windows therefore treats it as a composite device (usbccgp)
+; and splits the CDC control interface (MI_00) and the CDC data interface
+; (MI_01) into two separate functions: usbser binds to MI_00 alone, finds no
+; bulk endpoints there and fails to start (Code 10), while MI_01 is left
+; without a driver (Code 28) -- no COM port.
+;
+; Matching the whole device by VID/PID makes usbser the function driver for
+; the device, exactly as for a device that declares bDeviceClass = 2, and
+; usbser then finds both interfaces itself.  No files are installed; the
+; driver binary is Microsoft's own usbser.sys, referenced through usbser.inf.
+;
+; Install with install-driver.ps1 (elevated).  Windows 10/11 refuse to
+; install a driver package without a signed catalog, even one that ships no
+; binaries, so the script signs a catalog for this file with a self-signed
+; certificate that it then trusts on the machine -- the same thing Zadig
+; does.
+;
+; This replaces the vendor's "ChipDip USB Device" (libusb0) driver if that
+; one is installed; the vendor application does not work through a COM port.
+
+[Version]
+Signature   = "$Windows NT$"
+Class       = Ports
+ClassGUID   = {4D36E978-E325-11CE-BFC1-08002BE10318}
+Provider    = %Provider%
+DriverVer   = 09/19/2026,0.1.0.0
+CatalogFile = rdc2-0064-usbser.cat
+
+[Manufacturer]
+%Provider% = Devices, NTamd64, NTarm64
+
+[Devices.NTamd64]
+%DeviceDesc% = Install, USB\VID_0483&PID_A210
+
+[Devices.NTarm64]
+%DeviceDesc% = Install, USB\VID_0483&PID_A210
+
+[Install.NT]
+Include = usbser.inf
+Needs   = UsbSerial_Install.NT
+
+[Install.NT.Hw]
+Include = usbser.inf
+Needs   = UsbSerial_Install.NT.Hw
+
+[Install.NT.Services]
+Include = usbser.inf
+Needs   = UsbSerial_Install.NT.Services
+
+[Strings]
+Provider   = "OpenLA"
+DeviceDesc = "RDC2-0064 Logic Analyzer (USB Serial)"

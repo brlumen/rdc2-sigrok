@@ -1,0 +1,58 @@
+From ec9a301c7d333b8de33346fddf901fccc800e331 Mon Sep 17 00:00:00 2001
+From: BrLumen <igflocal@gmail.com>
+Date: Sat, 19 Sep 2026 10:57:23 +0700
+Subject: [PATCH] windows: Do not skip the port's own node when it is the
+ composite parent
+
+get_port_details() builds the USB path of a port from the CM_DRP_ADDRESS
+of every USB layer above it, and skips one layer for composite devices
+because the child nodes usbccgp creates for the interfaces carry the
+same address as the composite parent.
+
+The check looks at the compatible IDs of the node, which advertise
+USB\COMPOSITE for any device with bDeviceClass = 0 -- also when no
+usbccgp is involved at all because a driver was bound to the whole
+device.  That is what happens for a CDC device without an interface
+association descriptor once usbser.sys is attached by VID/PID: the port
+node itself is the composite-capable device, it gets skipped, the path
+ends up empty and sp_get_port_usb_vid_pid() and friends report
+SP_ERR_SUPP although the port is plainly USB.
+
+Only skip a composite node that is a parent of the port's node; the
+port's own node is the first layer and must contribute its address.
+
+Signed-off-by: BrLumen <igflocal@gmail.com>
+---
+ windows.c | 14 ++++++++++++--
+ 1 file changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/windows.c b/windows.c
+index 2825a92..e6c0801 100644
+--- a/windows.c
++++ b/windows.c
+@@ -428,10 +428,20 @@ SP_PRIV enum sp_return get_port_details(struct sp_port *port)
+ 				    || strncmp(device_id, "USB\\", 4))
+ 					continue;
+ 
+-				/* Discard one layer for composite devices. */
++				/*
++				 * Discard one layer for composite devices: the child
++				 * nodes usbccgp creates for the interfaces carry the
++				 * same address as the composite parent, so the parent
++				 * must not add it a second time. The port's own node
++				 * is exempt: when the serial driver is bound to the
++				 * whole device (e.g. usbser on a CDC device without
++				 * an interface association descriptor) there is no
++				 * child layer that could have contributed the address.
++				 */
+ 				char compat_ids[512], *p = compat_ids;
+ 				size = sizeof(compat_ids);
+-				if (CM_Get_DevNode_Registry_PropertyA(dev_inst,
++				if (dev_inst != device_info_data.DevInst &&
++				    CM_Get_DevNode_Registry_PropertyA(dev_inst,
+ 				                                      CM_DRP_COMPATIBLEIDS, 0,
+ 				                                      &compat_ids,
+ 				                                      &size, 0) == CR_SUCCESS) {
+-- 
+2.45.1.windows.1
+
