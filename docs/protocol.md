@@ -326,6 +326,26 @@ flight and rule §2.3 applies.
   8 channels. A 20 ms sleep that the OS stretches to 32 ms (Windows timer
   granularity) overflowed the ring there every time; the host tools drain
   and then wait 5 ms on a monotonic clock.
+* **The ring absorbs at most 14 packet times of host latency, and hosts do
+  pause for longer than that** (observed on one Windows 11 laptop, firmware
+  0.2, libusb transport, direct USB 2.0 connection). The host gets one
+  packet per `GET_SAMPLES` round trip and the firmware queues no commands,
+  so any pause of the host loop longer than the ring — 19 ms at 12 MB/s,
+  28 ms at 8 MB/s, 57 ms at 4 MB/s — ends the capture with the overflow
+  flag, however fast the host is otherwise. That laptop freezes all cores
+  for up to ~38 ms at a time, in bursts of shorter 2–13 ms pauses
+  (SMI-style stalls: two busy-wait probes pinned to different cores stop
+  together, with no USB traffic and with the radios off, more often under
+  CPU load). 8-channel streams at 12 MHz longer than a few seconds
+  overflowed in about half of the runs, with sigrok-cli and PulseView
+  alike, while 2-second runs almost always passed. Cycle times of the
+  libusb path on that machine: 12 MHz — median 1.365 ms (the packet time),
+  best 0.6 ms, 1st percentile 1.0 ms, so the host catches up by only
+  10–30 % per packet; 18 MHz — median 0.90 ms against a 0.91 ms packet
+  time. A second `GET_SAMPLES` posted ahead would buy one packet of slack
+  and put the single command slot at risk; the cures are a bigger ring in
+  the firmware or a lower data rate. The host tools report the overflow
+  flag from `SAMPLE_STOP` and leave the rate to the user.
 * **The USB stack stops responding after a few hundred control transfers**
   (observed on one board, firmware 0.2, Windows 11 host, direct USB 2.0
   connection). Every request on endpoint 0 after enumeration —
