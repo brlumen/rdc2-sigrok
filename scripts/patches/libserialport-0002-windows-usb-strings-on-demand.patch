@@ -1,0 +1,315 @@
+From b4f1e73c9a330d923f9b81eca403acfa26e94aa0 Mon Sep 17 00:00:00 2001
+From: BrLumen <igflocal@gmail.com>
+Date: Sun, 20 Sep 2026 00:17:54 +0700
+Subject: [PATCH] windows: Read USB string descriptors on demand, not while
+ listing ports
+
+get_port_details() ran for every port on every sp_list_ports() and
+sp_get_port_by_name() -- that is, on every sp_open() -- and for a USB
+port it opened and closed the port once "to wake the device up" and then
+read the manufacturer, product and serial number string descriptors
+through the hub. Unlike the rest of the USB details, which the hub
+answers from its cached copy of the device descriptor, those are control
+transfers to the device itself, so merely enumerating ports or opening
+one talked to every USB serial device on the machine.
+
+Some devices do not take that well. The ChipDip RDC2-0064 (an STM32 CDC
+device running ST's USB stack in DMA mode) stops responding altogether
+after a few hundred control transfers, and with the extra open/close and
+the three descriptor reads per open it lasted about a dozen open/close
+cycles on Windows before it had to be power-cycled.
+
+Keep the cheap details in get_port_details() and defer the strings to
+the first sp_get_port_usb_manufacturer/product/serial() call. The
+serial number fallback that reads the instance ID now also handles a
+port whose driver owns the whole device: the instance ID of the node
+itself carries the serial there, that of the parent only for an
+interface ("&MI_") node.
+
+Signed-off-by: BrLumen <igflocal@gmail.com>
+---
+ libserialport_internal.h |   5 ++
+ serialport.c             |  32 ++++++++++--
+ windows.c                | 105 ++++++++++++++++++++++++++++-----------
+ 3 files changed, 110 insertions(+), 32 deletions(-)
+
+diff --git a/libserialport_internal.h b/libserialport_internal.h
+index 57346d6..391fc94 100644
+--- a/libserialport_internal.h
++++ b/libserialport_internal.h
+@@ -148,6 +148,8 @@ struct sp_port {
+ 	char *bluetooth_address;
+ #ifdef _WIN32
+ 	char *usb_path;
++	DEVINST usb_dev_inst;
++	BOOL usb_strings_read;
+ 	HANDLE hdl;
+ 	COMMTIMEOUTS timeouts;
+ 	OVERLAPPED write_ovl;
+@@ -280,6 +282,9 @@ SP_PRIV struct sp_port **list_append(struct sp_port **list, const char *portname
+ /* OS-specific Helper functions. */
+ SP_PRIV enum sp_return get_port_details(struct sp_port *port);
+ SP_PRIV enum sp_return list_ports(struct sp_port ***list);
++#ifdef _WIN32
++SP_PRIV void get_usb_strings(struct sp_port *port);
++#endif
+ 
+ /* Timing abstraction */
+ 
+diff --git a/serialport.c b/serialport.c
+index b3b9249..a1e65cd 100644
+--- a/serialport.c
++++ b/serialport.c
+@@ -198,11 +198,29 @@ SP_API enum sp_return sp_get_port_usb_vid_pid(const struct sp_port *port,
+ 	RETURN_OK();
+ }
+ 
++/*
++ * On Windows the string descriptors are read from the device on first use
++ * rather than when the port is listed; the port structure is a cache, so
++ * filling it in behind a const pointer is fine.
++ */
++static void get_usb_strings_once(const struct sp_port *port)
++{
++#ifdef _WIN32
++	get_usb_strings((struct sp_port *)port);
++#else
++	(void)port;
++#endif
++}
++
+ SP_API char *sp_get_port_usb_manufacturer(const struct sp_port *port)
+ {
+ 	TRACE("%p", port);
+ 
+-	if (!port || port->transport != SP_TRANSPORT_USB || !port->usb_manufacturer)
++	if (!port || port->transport != SP_TRANSPORT_USB)
++		return NULL;
++
++	get_usb_strings_once(port);
++	if (!port->usb_manufacturer)
+ 		return NULL;
+ 
+ 	RETURN_STRING(port->usb_manufacturer);
+@@ -212,7 +230,11 @@ SP_API char *sp_get_port_usb_product(const struct sp_port *port)
+ {
+ 	TRACE("%p", port);
+ 
+-	if (!port || port->transport != SP_TRANSPORT_USB || !port->usb_product)
++	if (!port || port->transport != SP_TRANSPORT_USB)
++		return NULL;
++
++	get_usb_strings_once(port);
++	if (!port->usb_product)
+ 		return NULL;
+ 
+ 	RETURN_STRING(port->usb_product);
+@@ -222,7 +244,11 @@ SP_API char *sp_get_port_usb_serial(const struct sp_port *port)
+ {
+ 	TRACE("%p", port);
+ 
+-	if (!port || port->transport != SP_TRANSPORT_USB || !port->usb_serial)
++	if (!port || port->transport != SP_TRANSPORT_USB)
++		return NULL;
++
++	get_usb_strings_once(port);
++	if (!port->usb_serial)
+ 		return NULL;
+ 
+ 	RETURN_STRING(port->usb_serial);
+diff --git a/windows.c b/windows.c
+index e6c0801..edeed2b 100644
+--- a/windows.c
++++ b/windows.c
+@@ -24,7 +24,8 @@
+ #define MAX_USB_PATH ((8 * 3) + (7 * 1) + 1)
+ 
+ static void enumerate_hub(struct sp_port *port, const char *hub_name,
+-                          const char *parent_path, DEVINST dev_inst);
++                          const char *parent_path, DEVINST dev_inst,
++                          BOOL want_strings);
+ 
+ static char *wc_to_utf8(PWCHAR wc_buffer, ULONG wc_bytes)
+ {
+@@ -158,7 +159,8 @@ static char *get_string_descriptor(HANDLE hub_device, ULONG connection_index,
+ }
+ 
+ static void enumerate_hub_ports(struct sp_port *port, HANDLE hub_device,
+-                                ULONG nb_ports, const char *parent_path, DEVINST dev_inst)
++                                ULONG nb_ports, const char *parent_path, DEVINST dev_inst,
++                                BOOL want_strings)
+ {
+ 	char path[MAX_USB_PATH];
+ 	ULONG index = 0;
+@@ -209,7 +211,8 @@ static void enumerate_hub_ports(struct sp_port *port, HANDLE hub_device,
+ 			if ((ext_hub_name = get_external_hub_name(hub_device, index))) {
+ 				snprintf(path, sizeof(path), "%s%ld.",
+ 				         parent_path, connection_info_ex->ConnectionIndex);
+-				enumerate_hub(port, ext_hub_name, path, dev_inst);
++				enumerate_hub(port, ext_hub_name, path, dev_inst,
++				              want_strings);
+ 			}
+ 			free(connection_info_ex);
+ 		} else {
+@@ -227,6 +230,15 @@ static void enumerate_hub_ports(struct sp_port *port, HANDLE hub_device,
+ 			port->usb_vid = connection_info_ex->DeviceDescriptor.idVendor;
+ 			port->usb_pid = connection_info_ex->DeviceDescriptor.idProduct;
+ 
++			/*
++			 * Everything above came from the hub's cached copy of
++			 * the device descriptor. The strings have to be read
++			 * from the device itself, see get_usb_strings().
++			 */
++			if (!want_strings) {
++				free(connection_info_ex);
++				break;
++			}
+ 			if (connection_info_ex->DeviceDescriptor.iManufacturer)
+ 				port->usb_manufacturer = get_string_descriptor(hub_device, index,
+ 				           connection_info_ex->DeviceDescriptor.iManufacturer);
+@@ -237,12 +249,20 @@ static void enumerate_hub_ports(struct sp_port *port, HANDLE hub_device,
+ 				port->usb_serial = get_string_descriptor(hub_device, index,
+ 				           connection_info_ex->DeviceDescriptor.iSerialNumber);
+ 				if (port->usb_serial == NULL) {
+-					//composite device, get the parent's serial number
+-					char device_id[MAX_DEVICE_ID_LEN];
+-					if (CM_Get_Parent(&dev_inst, dev_inst, 0) == CR_SUCCESS) {
+-						if (CM_Get_Device_IDA(dev_inst, device_id, sizeof(device_id), 0) == CR_SUCCESS)
+-							port->usb_serial = strdup(strrchr(device_id, '\\')+1);
+-					}
++					/*
++					 * Fall back to the instance ID, which Windows
++					 * derives from the serial number: that of the
++					 * composite parent for an interface node
++					 * ("&MI_"), that of the node itself when the
++					 * driver owns the whole device.
++					 */
++					char device_id[MAX_DEVICE_ID_LEN] = "";
++					if (CM_Get_Device_IDA(dev_inst, device_id, sizeof(device_id), 0) == CR_SUCCESS
++					    && strstr(device_id, "&MI_")
++					    && CM_Get_Parent(&dev_inst, dev_inst, 0) == CR_SUCCESS)
++						CM_Get_Device_IDA(dev_inst, device_id, sizeof(device_id), 0);
++					if (strrchr(device_id, '\\'))
++						port->usb_serial = strdup(strrchr(device_id, '\\')+1);
+ 				}
+ 			}
+ 
+@@ -253,7 +273,8 @@ static void enumerate_hub_ports(struct sp_port *port, HANDLE hub_device,
+ }
+ 
+ static void enumerate_hub(struct sp_port *port, const char *hub_name,
+-                          const char *parent_path, DEVINST dev_inst)
++                          const char *parent_path, DEVINST dev_inst,
++                          BOOL want_strings)
+ {
+ 	USB_NODE_INFORMATION hub_info;
+ 	HANDLE hub_device;
+@@ -276,24 +297,26 @@ static void enumerate_hub(struct sp_port *port, const char *hub_name,
+ 	                    &hub_info, size, &hub_info, size, &size, NULL))
+ 		/* Enumerate the ports of the hub. */
+ 		enumerate_hub_ports(port, hub_device,
+-		   hub_info.u.HubInformation.HubDescriptor.bNumberOfPorts, parent_path, dev_inst);
++		   hub_info.u.HubInformation.HubDescriptor.bNumberOfPorts, parent_path, dev_inst,
++		   want_strings);
+ 
+ 	CloseHandle(hub_device);
+ }
+ 
+ static void enumerate_host_controller(struct sp_port *port,
+                                       HANDLE host_controller_device,
+-                                      DEVINST dev_inst)
++                                      DEVINST dev_inst, BOOL want_strings)
+ {
+ 	char *root_hub_name;
+ 
+ 	if ((root_hub_name = get_root_hub_name(host_controller_device))) {
+-		enumerate_hub(port, root_hub_name, "", dev_inst);
++		enumerate_hub(port, root_hub_name, "", dev_inst, want_strings);
+ 		free(root_hub_name);
+ 	}
+ }
+ 
+-static void get_usb_details(struct sp_port *port, DEVINST dev_inst_match)
++static void get_usb_details(struct sp_port *port, DEVINST dev_inst_match,
++                            BOOL want_strings)
+ {
+ 	HDEVINFO device_info;
+ 	SP_DEVINFO_DATA device_info_data;
+@@ -343,7 +366,8 @@ static void get_usb_details(struct sp_port *port, DEVINST dev_inst_match)
+ 		                                    GENERIC_WRITE, FILE_SHARE_WRITE,
+ 		                                    NULL, OPEN_EXISTING, 0, NULL);
+ 		if (host_controller_device != INVALID_HANDLE_VALUE) {
+-			enumerate_host_controller(port, host_controller_device, dev_inst_match);
++			enumerate_host_controller(port, host_controller_device,
++			                          dev_inst_match, want_strings);
+ 			CloseHandle(host_controller_device);
+ 		}
+ 		free(device_detail_data);
+@@ -471,20 +495,15 @@ SP_PRIV enum sp_return get_port_details(struct sp_port *port)
+ 
+ 			port->usb_path = strdup(usb_path);
+ 
+-			/* Wake up the USB device to be able to read string descriptor. */
+-			char *escaped_port_name;
+-			HANDLE handle;
+-			if (!(escaped_port_name = malloc(strlen(port->name) + 5)))
+-				RETURN_ERROR(SP_ERR_MEM, "Escaped port name malloc failed");
+-			sprintf(escaped_port_name, "\\\\.\\%s", port->name);
+-			handle = CreateFileA(escaped_port_name, GENERIC_READ, 0, 0,
+-			                     OPEN_EXISTING,
+-			                     FILE_ATTRIBUTE_NORMAL|FILE_FLAG_OVERLAPPED, 0);
+-			free(escaped_port_name);
+-			CloseHandle(handle);
+-
+-			/* Retrieve USB device details from the device descriptor. */
+-			get_usb_details(port, device_info_data.DevInst);
++			/*
++			 * Retrieve the USB device details from the hub's copy of
++			 * the device descriptor. This never talks to the device;
++			 * the string descriptors do, and are only read when they
++			 * are asked for, see get_usb_strings().
++			 */
++			port->usb_dev_inst = device_info_data.DevInst;
++			port->usb_strings_read = FALSE;
++			get_usb_details(port, device_info_data.DevInst, FALSE);
+ 		}
+ 		break;
+ 	}
+@@ -494,6 +513,34 @@ SP_PRIV enum sp_return get_port_details(struct sp_port *port)
+ 	RETURN_OK();
+ }
+ 
++/*
++ * Read the USB string descriptors of a port on first use. Unlike the rest of
++ * the USB details these are control transfers to the device itself, and the
++ * device may have to be woken up for them; neither belongs in port listing
++ * or sp_open(), which some devices do not survive many times over.
++ */
++SP_PRIV void get_usb_strings(struct sp_port *port)
++{
++	char *escaped_port_name;
++	HANDLE handle;
++
++	if (port->transport != SP_TRANSPORT_USB || port->usb_strings_read)
++		return;
++	port->usb_strings_read = TRUE;
++
++	/* Wake up the USB device to be able to read string descriptor. */
++	if (!(escaped_port_name = malloc(strlen(port->name) + 5)))
++		return;
++	sprintf(escaped_port_name, "\\\\.\\%s", port->name);
++	handle = CreateFileA(escaped_port_name, GENERIC_READ, 0, 0,
++	                     OPEN_EXISTING,
++	                     FILE_ATTRIBUTE_NORMAL|FILE_FLAG_OVERLAPPED, 0);
++	free(escaped_port_name);
++	CloseHandle(handle);
++
++	get_usb_details(port, port->usb_dev_inst, TRUE);
++}
++
+ SP_PRIV enum sp_return list_ports(struct sp_port ***list)
+ {
+ 	HKEY key;
+-- 
+2.45.1.windows.1
+
