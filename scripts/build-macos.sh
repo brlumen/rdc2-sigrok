@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 BrLumen
 #
-# build-macos.sh -- reproducible build of the sigrok stack for OpenLA.
+# build-macos.sh -- reproducible build of the sigrok stack for rdc2-sigrok.
 #
 # Builds libsigrok + libsigrokdecode + sigrok-cli + PulseView from the upstream
 # git commits pinned in scripts/versions.env into a private prefix, so that the
@@ -28,7 +28,7 @@
 #   <repo>/.build/build/pulseview out-of-tree CMake build dir
 #   <repo>/.build/stamps/         "what is currently checked out" markers
 #   <repo>/.build/logs/<name>.log full build log per component
-#   $PREFIX/{bin,lib,share}       install tree (default ~/.local/openla)
+#   $PREFIX/{bin,lib,share}       install tree (default ~/.local/rdc2-sigrok)
 #
 # Re-running is cheap: components whose pinned commit, patches and driver hook
 # are unchanged only re-run make (a no-op) and make install.
@@ -53,7 +53,7 @@ DRIVER_HOOK="${REPO_ROOT}/sigrok/apply.sh"
 
 ALL_COMPONENTS="libsigrok libsigrokdecode sigrok-cli pulseview"
 
-PREFIX="${OPENLA_PREFIX:-${HOME}/.local/openla}"
+PREFIX="${RDC2_SIGROK_PREFIX:-${HOME}/.local/rdc2-sigrok}"
 COMPONENTS=""
 CLEAN=0
 DO_BREW=1
@@ -86,12 +86,12 @@ die()  { printf '%s[error] %s%s\n' "${C_R}" "$*" "${C_0}" >&2; exit 1; }
 
 usage() {
 	cat <<'EOF'
-build-macos.sh -- build the sigrok stack for OpenLA from pinned git commits.
+build-macos.sh -- build the sigrok stack for rdc2-sigrok from pinned git commits.
 
 Usage: scripts/build-macos.sh [OPTIONS]
 
 Options:
-  --prefix DIR     Install prefix. Default: $OPENLA_PREFIX or ~/.local/openla
+  --prefix DIR     Install prefix. Default: $RDC2_SIGROK_PREFIX or ~/.local/rdc2-sigrok
   --only NAME      Build only this component; repeatable. One of:
                      libsigrok  libsigrokdecode  sigrok-cli  pulseview
                    Default: all four, in dependency order.
@@ -104,7 +104,7 @@ Options:
   -h, --help       This text.
 
 Environment:
-  OPENLA_PREFIX    Same as --prefix (the command line wins).
+  RDC2_SIGROK_PREFIX    Same as --prefix (the command line wins).
 
 What it does:
   1. brew install of the build dependencies (unless --no-brew).
@@ -532,7 +532,7 @@ verify() {
 
 START_TS="$(date +%s)"
 
-step "OpenLA sigrok stack"
+step "sigrok stack + RDC2-0064 driver"
 info "prefix     ${PREFIX}"
 info "components ${COMPONENTS}"
 info "jobs       ${JOBS}"
@@ -546,7 +546,7 @@ if selected libsigrok; then
 	if [ -f "${DRIVER_HOOK}" ]; then
 		info "driver hook ${DRIVER_HOOK}"
 	else
-		warn "no ${DRIVER_HOOK} yet -- building vanilla libsigrok without the OpenLA driver"
+		warn "no ${DRIVER_HOOK} yet -- building vanilla libsigrok without the rdc2-sigrok driver"
 	fi
 fi
 

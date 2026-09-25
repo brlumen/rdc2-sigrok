@@ -17,7 +17,7 @@ Run it from the repository with the rdc2la virtualenv:
     python/.venv/bin/python scripts/hw-selftest.py [--edge] [--meter]
         [--sigrok | --no-sigrok] [--stream-rate 12M] [--port /dev/cu...|usb]
 
-sigrok-cli is exercised when it is on PATH or in $OPENLA_PREFIX/bin.
+sigrok-cli is exercised when it is on PATH or in $RDC2_SIGROK_PREFIX/bin.
 Exit status is 0 when every check passed.
 """
 
@@ -311,7 +311,7 @@ def test_meter(rep: Report, dev: Device) -> None:
 
 
 def find_sigrok_cli() -> str | None:
-    prefix = os.environ.get("OPENLA_PREFIX", os.path.expanduser("~/.local/openla"))
+    prefix = os.environ.get("RDC2_SIGROK_PREFIX", os.path.expanduser("~/.local/rdc2-sigrok"))
     cand = os.path.join(prefix, "bin", "sigrok-cli")
     if os.access(cand, os.X_OK):
         return cand

@@ -29,7 +29,7 @@ usb = ["pyusb>=1.2.1", "libusb-package>=1.0.26"]
 rdc2la = "rdc2la.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/BrLumen/OpenLA"
+Homepage = "https://github.com/BrLumen/rdc2-sigrok"
 
 [tool.setuptools]
 packages = ["rdc2la"]

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 BrLumen
 #
-# build-msys2.sh -- reproducible build of the sigrok stack for OpenLA on
+# build-msys2.sh -- reproducible build of the sigrok stack for rdc2-sigrok on
 # Windows, from an MSYS2 UCRT64 shell.
 #
 # Windows counterpart of build-macos.sh.  Same pinned commits
@@ -39,7 +39,7 @@
 # Prerequisites: MSYS2 (https://www.msys2.org, e.g. "winget install
 # MSYS2.MSYS2") and its UCRT64 shell, C:\msys64\ucrt64.exe.  From any other
 # shell:
-#   MSYSTEM=UCRT64 C:\msys64\usr\bin\bash.exe -lc 'cd /c/path/to/OpenLA && scripts/build-msys2.sh'
+#   MSYSTEM=UCRT64 C:\msys64\usr\bin\bash.exe -lc 'cd /c/path/to/rdc2-sigrok && scripts/build-msys2.sh'
 #
 # See build-macos.sh for the driver-hook contract and the .build/ layout;
 # they are identical.  No hardware is touched at any point.
@@ -62,7 +62,7 @@ DRIVER_HOOK="${REPO_ROOT}/sigrok/apply.sh"
 
 ALL_COMPONENTS="libserialport libsigrok libsigrokdecode sigrok-cli pulseview"
 
-PREFIX="${OPENLA_PREFIX:-${HOME}/.local/openla}"
+PREFIX="${RDC2_SIGROK_PREFIX:-${HOME}/.local/rdc2-sigrok}"
 COMPONENTS=""
 CLEAN=0
 DO_PACMAN=1
@@ -89,13 +89,13 @@ die()  { printf '%s[error] %s%s\n' "${C_R}" "$*" "${C_0}" >&2; exit 1; }
 
 usage() {
 	cat <<'EOF'
-build-msys2.sh -- build the sigrok stack for OpenLA from pinned git commits
+build-msys2.sh -- build the sigrok stack for rdc2-sigrok from pinned git commits
 (Windows, MSYS2 UCRT64 shell).
 
 Usage: scripts/build-msys2.sh [OPTIONS]
 
 Options:
-  --prefix DIR     Install prefix. Default: $OPENLA_PREFIX or ~/.local/openla
+  --prefix DIR     Install prefix. Default: $RDC2_SIGROK_PREFIX or ~/.local/rdc2-sigrok
                    (an MSYS2 path; ~ is C:\msys64\home\<user>)
   --only NAME      Build only this component; repeatable. One of:
                      libserialport  libsigrok  libsigrokdecode  sigrok-cli
@@ -110,7 +110,7 @@ Options:
   -h, --help       This text.
 
 Environment:
-  OPENLA_PREFIX    Same as --prefix (the command line wins).
+  RDC2_SIGROK_PREFIX    Same as --prefix (the command line wins).
 
 What it does:
   1. pacman -S of the build dependencies (unless --no-pacman).
@@ -399,7 +399,7 @@ build_libserialport() {
 	# Built from source, unlike on macOS: the release needs
 	# scripts/patches/libserialport-0001-*.patch before it can report the
 	# USB VID/PID of a port whose driver owns the whole device (usbser
-	# bound by windows/rdc2-0064-usbser.inf), which is how the OpenLA
+	# bound by windows/rdc2-0064-usbser.inf), which is how the rdc2-sigrok
 	# driver finds the board, and 0002/0003 to open the port without
 	# control transfers the firmware cannot survive.
 	autotools_build libserialport "${state}"
@@ -532,7 +532,7 @@ verify() {
 
 START_TS="$(date +%s)"
 
-step "OpenLA sigrok stack (MSYS2 ${MSYSTEM})"
+step "sigrok stack + RDC2-0064 driver (MSYS2 ${MSYSTEM})"
 info "prefix     ${PREFIX}"
 info "components ${COMPONENTS}"
 info "jobs       ${JOBS}"
@@ -546,7 +546,7 @@ if selected libsigrok; then
 	if [ -f "${DRIVER_HOOK}" ]; then
 		info "driver hook ${DRIVER_HOOK}"
 	else
-		warn "no ${DRIVER_HOOK} yet -- building vanilla libsigrok without the OpenLA driver"
+		warn "no ${DRIVER_HOOK} yet -- building vanilla libsigrok without the rdc2-sigrok driver"
 	fi
 fi
 

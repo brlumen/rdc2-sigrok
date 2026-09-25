@@ -1,4 +1,4 @@
-# OpenLA — RDC2-0064 on macOS and Linux
+# rdc2-sigrok — RDC2-0064 on macOS and Linux
 
 Open-source host software for the **ChipDip RDC2-0064** logic analyzer
 (32 channels, 72 MHz, STM32F722, USB CDC-ACM). The vendor ships a
@@ -43,7 +43,7 @@ cd python && python3 -m venv .venv && .venv/bin/pip install -e .
 .venv/bin/rdc2la id
 .venv/bin/rdc2la capture --mode stream --rate 100k --channels 8 --duration 10m -o capture.sr
 
-# sigrok stack with the driver (installs into ~/.local/openla)
+# sigrok stack with the driver (installs into ~/.local/rdc2-sigrok)
 scripts/build-macos.sh
 . scripts/env.sh
 sigrok-cli --driver chipdip-rdc2-0064 --scan

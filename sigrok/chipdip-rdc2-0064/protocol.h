@@ -34,8 +34,8 @@
  * sdi->inst_type says which one an instance uses.
  *
  * Protocol summary (the authoritative description including all firmware
- * quirks is docs/protocol.md of the OpenLA project,
- * https://github.com/BrLumen/OpenLA):
+ * quirks is docs/protocol.md of the rdc2-sigrok project,
+ * https://github.com/BrLumen/rdc2-sigrok):
  *
  *  - Host to device: always exactly 64 bytes, zero padded, written in one
  *    go. Byte 0 selects the module, byte 1 the command, byte 2 is unused,

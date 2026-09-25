@@ -1,4 +1,4 @@
-OpenLA — open-source tooling for the ChipDip RDC2-0064 logic analyzer.
+rdc2-sigrok — open-source tooling for the ChipDip RDC2-0064 logic analyzer.
 Copyright (c) 2026 BrLumen
 
 This project is based on the RDC2-0064 firmware and "Logic Analyzer"

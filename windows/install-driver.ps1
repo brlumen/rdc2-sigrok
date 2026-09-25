@@ -18,7 +18,7 @@
 #
 # To undo: "pnputil /enum-drivers", find the entry whose Original Name is
 # rdc2-0064-usbser.inf, then "pnputil /delete-driver oemNN.inf /uninstall".
-# The certificate is "OpenLA RDC2-0064 driver package" in the two stores
+# The certificate is "rdc2-sigrok RDC2-0064 driver package" in the two stores
 # named above (certlm.msc).
 
 [CmdletBinding()]
@@ -27,7 +27,7 @@ param()
 $ErrorActionPreference = 'Stop'
 $InfName = 'rdc2-0064-usbser.inf'
 $CatName = 'rdc2-0064-usbser.cat'
-$Subject = 'CN=OpenLA RDC2-0064 driver package'
+$Subject = 'CN=rdc2-sigrok RDC2-0064 driver package'
 $HardwareId = 'USB\VID_0483&PID_A210'
 
 $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -44,7 +44,7 @@ if (-not (Test-Path $src)) { throw "missing $src" }
 
 # A scratch directory holding only the INF: New-FileCatalog hashes every
 # file it finds there.
-$work = Join-Path $env:TEMP 'openla-rdc2-0064-driver'
+$work = Join-Path $env:TEMP 'rdc2-sigrok-driver'
 if (Test-Path $work) { Remove-Item -Recurse -Force $work }
 New-Item -ItemType Directory -Path $work | Out-Null
 Copy-Item $src $work
@@ -60,7 +60,7 @@ try {
     # signature it just made, and a self-signed certificate only verifies once
     # it is in Root.
     Write-Host '==> Trusting the certificate on this machine'
-    $cer = Join-Path $work 'openla-driver.cer'
+    $cer = Join-Path $work 'rdc2-sigrok-driver.cer'
     Export-Certificate -Cert $cert -FilePath $cer | Out-Null
     foreach ($store in 'Root', 'TrustedPublisher') {
         Import-Certificate -FilePath $cer -CertStoreLocation "Cert:\LocalMachine\$store" | Out-Null

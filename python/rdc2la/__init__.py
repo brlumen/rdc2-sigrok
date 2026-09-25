@@ -2,7 +2,7 @@
 # Copyright (c) 2026 BrLumen
 """rdc2la - host library and CLI for the ChipDip RDC2-0064 logic analyzer.
 
-The protocol is documented in ``docs/protocol.md`` of the OpenLA repository.
+The protocol is documented in ``docs/protocol.md`` of the rdc2-sigrok repository.
 
 Typical use::
 

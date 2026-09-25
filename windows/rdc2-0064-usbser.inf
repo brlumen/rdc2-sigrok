@@ -56,5 +56,5 @@ Include = usbser.inf
 Needs   = UsbSerial_Install.NT.Services
 
 [Strings]
-Provider   = "OpenLA"
+Provider   = "rdc2-sigrok"
 DeviceDesc = "RDC2-0064 Logic Analyzer (USB Serial)"

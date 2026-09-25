@@ -13,7 +13,7 @@
 # script only when the prefix moves.
 #
 # Usage: scripts/install-app.sh [--prefix DIR] [--dir DIR]
-#   --prefix DIR   sigrok stack prefix. Default: $OPENLA_PREFIX or ~/.local/openla
+#   --prefix DIR   sigrok stack prefix. Default: $RDC2_SIGROK_PREFIX or ~/.local/rdc2-sigrok
 #   --dir DIR      where to put PulseView.app. Default: /Applications
 #                  (falls back to ~/Applications when not writable)
 
@@ -21,7 +21,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
-PREFIX="${OPENLA_PREFIX:-$HOME/.local/openla}"
+PREFIX="${RDC2_SIGROK_PREFIX:-$HOME/.local/rdc2-sigrok}"
 APP_DIR=""
 ICON_SRC="${REPO_ROOT}/.build/src/pulseview/icons/pulseview.svg"
 
@@ -56,7 +56,7 @@ mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources"
 # Launcher. Finder does not pass the shell environment, so it is set here.
 cat > "${APP}/Contents/MacOS/PulseView" <<EOF
 #!/bin/bash
-export OPENLA_PREFIX="${PREFIX}"
+export RDC2_SIGROK_PREFIX="${PREFIX}"
 export PATH="${PREFIX}/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 export XDG_DATA_DIRS="/usr/local/share:/usr/share"
 exec "${PREFIX}/bin/pulseview" "\$@"
@@ -73,7 +73,7 @@ cat > "${APP}/Contents/Info.plist" <<EOF
 <dict>
 	<key>CFBundleName</key>            <string>PulseView</string>
 	<key>CFBundleDisplayName</key>     <string>PulseView</string>
-	<key>CFBundleIdentifier</key>      <string>org.sigrok.pulseview.openla</string>
+	<key>CFBundleIdentifier</key>      <string>org.sigrok.pulseview.rdc2-sigrok</string>
 	<key>CFBundleExecutable</key>      <string>PulseView</string>
 	<key>CFBundleIconFile</key>        <string>PulseView</string>
 	<key>CFBundlePackageType</key>     <string>APPL</string>
